@@ -33,13 +33,13 @@ export function statePaths(projectRoot = process.cwd()) {
     path.join(projectRoot, 'data', 'session-materials');
   const root = path.join(materialRoot, 'iron-proxy');
   const shared = path.join(root, 'shared');
-  const approvalDir = path.join(os.tmpdir(), `nanoclaw-iron-${getInstallSlug(projectRoot)}`);
+  const approvalDir = path.join(root, 'approval');
   return {
     materialRoot,
     root,
     shared,
     approvalDir,
-    approvalSocket: path.join(approvalDir, 'approval.sock'),
+    approvalSocket: path.join(os.tmpdir(), `nanoclaw-iron-socket-${getInstallSlug(projectRoot)}`, 'approval.sock'),
     caCert: path.join(shared, 'ca.crt'),
     caKey: path.join(shared, 'ca.key'),
     secretFile: path.join(shared, 'upstream-secret'),

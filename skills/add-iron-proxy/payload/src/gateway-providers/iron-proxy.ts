@@ -54,6 +54,7 @@ export interface IronProxySettings {
   caCert: string;
   caKey: string;
   secretFile: string;
+  approvalDir: string;
   approvalSocket: string;
   agentCaCert: string;
   allowedHostsFile: string;
@@ -88,7 +89,7 @@ function assertMaterialPath(file: string, root: string, label: string): void {
 }
 
 function defaultApprovalSocket(projectRoot: string): string {
-  return path.join(os.tmpdir(), `nanoclaw-iron-${getInstallSlug(projectRoot)}`, 'approval.sock');
+  return path.join(os.tmpdir(), `nanoclaw-iron-socket-${getInstallSlug(projectRoot)}`, 'approval.sock');
 }
 
 export function validateAllowedHost(raw: string): string {
@@ -113,13 +114,17 @@ export function readIronProxySettings(
   }
   const authEnv = value('NANOCLAW_IRON_PROXY_AUTH_ENV') || 'ANTHROPIC_API_KEY';
   if (!AUTH_ENV_KEYS.has(authEnv)) throw new Error(`Iron Proxy auth env is unsupported: ${authEnv}`);
+  const approvalSocket = value('NANOCLAW_IRON_PROXY_APPROVAL_SOCKET') || defaultApprovalSocket(projectRoot);
   const settings: IronProxySettings = {
     materialRoot,
     image,
     caCert: value('NANOCLAW_IRON_PROXY_CA_CERT') || path.join(gatewayRoot, 'shared', 'ca.crt'),
     caKey: value('NANOCLAW_IRON_PROXY_CA_KEY') || path.join(gatewayRoot, 'shared', 'ca.key'),
     secretFile: value('NANOCLAW_IRON_PROXY_SECRET_FILE') || path.join(gatewayRoot, 'shared', 'upstream-secret'),
-    approvalSocket: value('NANOCLAW_IRON_PROXY_APPROVAL_SOCKET') || defaultApprovalSocket(projectRoot),
+    approvalDir: isInside(approvalSocket, materialRoot)
+      ? path.dirname(approvalSocket)
+      : path.join(gatewayRoot, 'approval'),
+    approvalSocket,
     agentCaCert: path.join(projectRoot, 'container', 'skills', 'iron-proxy-gateway', 'ca.crt'),
     allowedHostsFile:
       value('NANOCLAW_IRON_PROXY_ALLOWED_HOSTS') || path.join(gatewayRoot, 'shared', 'allowed-hosts.json'),
@@ -139,6 +144,7 @@ export function readIronProxySettings(
     caCert: settings.caCert,
     caKey: settings.caKey,
     secretFile: settings.secretFile,
+    approvalDir: settings.approvalDir,
     allowedHostsFile: settings.allowedHostsFile,
   })) {
     assertMaterialPath(materialPath, materialRoot, label);
@@ -151,6 +157,20 @@ export function readIronProxySettings(
     throw new Error('Iron Proxy approvalSocket exceeds the portable Unix socket path limit');
   }
   return settings;
+}
+
+function ensureApprovalSocketAlias(settings: IronProxySettings): void {
+  const alias = path.dirname(settings.approvalSocket);
+  if (alias === settings.approvalDir) return;
+  fs.mkdirSync(settings.approvalDir, { recursive: true, mode: 0o700 });
+  try {
+    if (fs.realpathSync(alias) !== fs.realpathSync(settings.approvalDir)) {
+      throw new Error('Iron Proxy approval socket alias points outside its material directory');
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    fs.symlinkSync(settings.approvalDir, alias, 'dir');
+  }
 }
 
 function readAllowedHosts(settings: IronProxySettings): string[] {
@@ -276,7 +296,7 @@ export function ironProxyContribution(
           materialMount(settings.caCert, CA_CERT_PATH),
           materialMount(settings.caKey, CA_KEY_PATH),
           materialMount(settings.secretFile, SECRET_PATH),
-          materialMount(path.dirname(settings.approvalSocket), APPROVAL_DIR),
+          materialMount(settings.approvalDir, APPROVAL_DIR),
         ],
         labels: { 'nanoclaw.gateway.runtime-identity': materialId(input.runtimeIdentity) },
         args: ['-config', CONFIG_PATH],
@@ -301,6 +321,7 @@ export function defineIronProxyProvider(initialSettings?: IronProxySettings): Ga
   const currentBridge = (): IronProxyApprovalBridge => {
     if (bridge) return bridge;
     const configured = currentSettings();
+    ensureApprovalSocketAlias(configured);
     bridge = new IronProxyApprovalBridge(
       {
         socketPath: configured.approvalSocket,

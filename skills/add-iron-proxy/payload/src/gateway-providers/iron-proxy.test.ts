@@ -30,6 +30,7 @@ const settings: IronProxySettings = {
   caCert: path.join(materialRoot, 'iron-proxy/shared/ca.crt'),
   caKey: path.join(materialRoot, 'iron-proxy/shared/ca.key'),
   secretFile: path.join(materialRoot, 'iron-proxy/shared/upstream-secret'),
+  approvalDir: path.join(materialRoot, 'iron-proxy/approval'),
   approvalSocket: path.join(materialRoot, 'iron-proxy/approval/approval.sock'),
   agentCaCert: path.join(root, 'container/skills/iron-proxy-gateway/ca.crt'),
   allowedHostsFile: path.join(materialRoot, 'iron-proxy/shared/allowed-hosts.json'),
@@ -86,7 +87,7 @@ describe('Iron Proxy provider', () => {
     expect(contribution.containers?.[0].mounts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ hostPath: settings.secretFile, class: 'identity-material', mode: 'ro' }),
-        expect.objectContaining({ hostPath: path.dirname(settings.approvalSocket), class: 'identity-material' }),
+        expect.objectContaining({ hostPath: settings.approvalDir, class: 'identity-material' }),
       ]),
     );
   });
@@ -115,6 +116,7 @@ describe('Iron Proxy provider', () => {
     expect(Buffer.byteLength(configured.approvalSocket)).toBeLessThanOrEqual(100);
     expect(path.relative(os.tmpdir(), configured.approvalSocket)).not.toMatch(/^\.\./);
     expect(statePaths(projectRoot).approvalSocket).toBe(configured.approvalSocket);
+    expect(statePaths(projectRoot).approvalDir).toBe(configured.approvalDir);
   });
 
   it('uses one idempotent ensure, preserves on abort, and revokes only explicitly', async () => {
@@ -125,6 +127,7 @@ describe('Iron Proxy provider', () => {
       caCert: path.join(project, 'materials/iron-proxy/shared/ca.crt'),
       caKey: path.join(project, 'materials/iron-proxy/shared/ca.key'),
       secretFile: path.join(project, 'materials/iron-proxy/shared/upstream-secret'),
+      approvalDir: path.join(project, 'materials/iron-proxy/approval'),
       approvalSocket: path.join(project, 'materials/iron-proxy/approval/approval.sock'),
       allowedHostsFile: path.join(project, 'materials/iron-proxy/shared/allowed-hosts.json'),
       agentCaCert: path.join(project, 'container/skills/iron-proxy-gateway/ca.crt'),
