@@ -1,94 +1,146 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import fs from 'node:fs';
+import path from 'node:path';
 
-import { describe, expect, it, vi } from "vitest";
+import { parse as parseYaml } from 'yaml';
+import { describe, expect, it, vi } from 'vitest';
 
-vi.mock("../env.js", () => ({ readEnvFile: () => ({}) }));
+import type { GatewaySessionInput } from './gateway-provider-registry.js';
+
+vi.mock('../env.js', () => ({ readEnvFile: () => ({}) }));
+vi.mock('../db/sessions.js', () => ({
+  createPendingApproval: vi.fn(),
+  deletePendingApproval: vi.fn(),
+  getPendingApproval: vi.fn(),
+  getPendingApprovalsByAction: async () => [],
+  getSession: vi.fn(),
+  transitionPendingApprovalStatus: vi.fn(),
+}));
 
 import {
-  IronProxyProvider,
+  ironProxyConfig,
   ironProxyContribution,
+  IronProxyProvider,
   readIronProxySettings,
-} from "./iron-proxy.js";
+  type IronProxySettings,
+} from './iron-proxy.js';
 
-const settings = {
-  port: 18080,
-  containerName: "nanoclaw-iron-proxy-test",
-  caCert: "/safe/iron-proxy-ca.crt",
-  authEnv: "ANTHROPIC_API_KEY",
+const digest = `ghcr.io/nanocoai/iron-proxy@sha256:${'a'.repeat(64)}`;
+const root = '/tmp/nanoclaw-iron-test';
+const materialRoot = path.join(root, 'data', 'session-materials');
+const settings: IronProxySettings = {
+  materialRoot,
+  image: digest,
+  caCert: path.join(materialRoot, 'iron-proxy/shared/ca.crt'),
+  caKey: path.join(materialRoot, 'iron-proxy/shared/ca.key'),
+  secretFile: path.join(materialRoot, 'iron-proxy/shared/upstream-secret'),
+  approvalSocket: path.join(materialRoot, 'iron-proxy/approval/approval.sock'),
+  agentCaCert: path.join(root, 'container/skills/iron-proxy-gateway/ca.crt'),
+  allowedHostsFile: path.join(materialRoot, 'iron-proxy/shared/allowed-hosts.json'),
+  authEnv: 'ANTHROPIC_API_KEY',
+  modelHost: 'api.anthropic.com',
+  approvalTimeoutMs: 120_000,
+  maxPending: 32,
+};
+const input: GatewaySessionInput = {
+  key: { installSlug: 'install', agentGroupId: 'group', sessionId: 'session' },
+  runtimeIdentity: 'install/group/session',
+  groupName: 'Group',
+  capabilities: {
+    isolationTiers: ['container'],
+    admissionEnforced: false,
+    networkPolicy: 'topology' as const,
+    encryptedVolumes: false,
+    unrealized: [],
+    sharedNetworkNamespace: false,
+    auxiliaryContainers: true,
+    imageBuild: true,
+  },
 };
 
-describe("IronProxyProvider", () => {
-  it("contributes only a proxy placeholder and read-only CA", () => {
-    expect(ironProxyContribution(settings, "g1")).toMatchObject({
-      env: {
-        HTTPS_PROXY: "http://host.docker.internal:18080",
-        ANTHROPIC_API_KEY: "gateway-managed",
-        NODE_EXTRA_CA_CERTS: "/run/nanoclaw-gateway/iron-proxy-ca.crt",
-      },
-      mounts: [
-        {
-          class: "allowlisted-extra",
-          hostPath: "/safe/iron-proxy-ca.crt",
-          containerPath: "/run/nanoclaw-gateway/iron-proxy-ca.crt",
-          mode: "ro",
-          groupScope: "g1",
-        },
-      ],
+describe('Iron Proxy provider', () => {
+  it('renders allowlist, approval, then secret injection from one credential rule', () => {
+    const config = parseYaml(ironProxyConfig(settings, input.runtimeIdentity));
+    expect(config.transforms.map((entry: { name: string }) => entry.name)).toEqual(['allowlist', 'grpc', 'secrets']);
+    expect(config.transforms[1].config.rules).toEqual(config.transforms[2].config.secrets[0].rules);
+    expect(config.transforms[1].config.rules[0].methods).not.toContain('CONNECT');
+    expect(config.transforms[1].config).toMatchObject({
+      target: 'unix:///run/nanoclaw-gateway/approval.sock',
+      workload_identity: input.runtimeIdentity,
+      send_request_body: false,
     });
+    expect(config.transforms[2].config.secrets[0].source.path).toBe('/run/secrets/upstream');
   });
 
-  it("refuses invalid setup state", () => {
-    expect(() =>
-      readIronProxySettings({ NANOCLAW_IRON_PROXY_PORT: "80" }, "/tmp/project"),
-    ).toThrow(/valid unprivileged port/);
+  it('contributes one isolated proxy, typed material, and no credential mount to the agent', () => {
+    const configFile = path.join(materialRoot, 'iron-proxy/sessions/id/config.yaml');
+    const contribution = ironProxyContribution(settings, input, configFile);
+    expect(contribution.networkAccess).toEqual({
+      endpoint: 'iron-proxy',
+      target: { kind: 'session-container', role: 'gateway-proxy' },
+    });
+    expect(contribution.mounts).toBeUndefined();
+    expect(contribution.env).toMatchObject({
+      HTTPS_PROXY: 'http://iron-proxy:8080',
+      ANTHROPIC_API_KEY: 'gateway-managed',
+      NODE_EXTRA_CA_CERTS: '/home/node/.claude/skills/iron-proxy-gateway/ca.crt',
+    });
+    expect(contribution.containers).toHaveLength(1);
+    expect(contribution.containers?.[0]).toMatchObject({ role: 'gateway-proxy', image: digest, env: {} });
+    expect(contribution.containers?.[0].mounts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ hostPath: settings.secretFile, class: 'identity-material', mode: 'ro' }),
+        expect.objectContaining({ hostPath: path.dirname(settings.approvalSocket), class: 'identity-material' }),
+      ]),
+    );
+  });
+
+  it('requires an immutable image and keeps every private path under the material root', () => {
+    expect(() => readIronProxySettings({ NANOCLAW_IRON_PROXY_IMAGE: 'ironsh/iron-proxy:latest' }, root)).toThrow(
+      /exact GHCR digest/,
+    );
     expect(() =>
       readIronProxySettings(
         {
-          NANOCLAW_IRON_PROXY_PORT: "18080",
-          NANOCLAW_IRON_PROXY_AUTH_ENV: "ARBITRARY_SECRET",
+          NANOCLAW_IRON_PROXY_IMAGE: digest,
+          NANOCLAW_IRON_PROXY_SECRET_FILE: '/tmp/outside-secret',
         },
-        "/tmp/project",
+        root,
       ),
-    ).toThrow(/unsupported/);
+    ).toThrow(/inside NANOCLAW_SESSION_MATERIAL_ROOT/);
   });
 
-  it("stops registered sessions when the central proxy disappears", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "iron-proxy-provider-"));
-    const caCert = path.join(root, "ca.crt");
-    fs.writeFileSync(caCert, "test ca");
-    let running = true;
-    let poll: (() => void) | undefined;
-    const provider = new IronProxyProvider({
-      settings: () => ({ ...settings, caCert }),
-      isRunning: () => running,
-      setInterval: (callback) => {
-        poll = callback;
-        return { unref() {} } as ReturnType<typeof setInterval>;
-      },
-      clearInterval: vi.fn(),
-    });
-    provider.startHost();
-    const session = await provider.prepareSession({
-      key: { installSlug: "i1", agentGroupId: "g1", sessionId: "s1" },
-      groupName: "Group",
-      capabilities: {
-        isolationTiers: ["container"],
-        admissionEnforced: false,
-        networkPolicy: "topology",
-        encryptedVolumes: false,
-        unrealized: [],
-        sharedNetworkNamespace: false,
-        auxiliaryContainers: false,
-        imageBuild: true,
-      },
-    });
+  it('keeps detach adoptable, revokes on release, and reports lost material', async () => {
+    const project = fs.mkdtempSync(path.join('/private/tmp', 'ip-'));
+    const liveSettings: IronProxySettings = {
+      ...settings,
+      materialRoot: path.join(project, 'materials'),
+      caCert: path.join(project, 'materials/iron-proxy/shared/ca.crt'),
+      caKey: path.join(project, 'materials/iron-proxy/shared/ca.key'),
+      secretFile: path.join(project, 'materials/iron-proxy/shared/upstream-secret'),
+      approvalSocket: path.join(project, 'materials/iron-proxy/approval/approval.sock'),
+      allowedHostsFile: path.join(project, 'materials/iron-proxy/shared/allowed-hosts.json'),
+      agentCaCert: path.join(project, 'container/skills/iron-proxy-gateway/ca.crt'),
+    };
+    for (const file of [liveSettings.caCert, liveSettings.caKey, liveSettings.secretFile, liveSettings.agentCaCert]) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'test');
+    }
+    const provider = new IronProxyProvider(liveSettings);
+    await provider.approvalBridge.start({ deliveryAdapter: { deliver: vi.fn() } } as never);
+    const first = await provider.prepareSession(input);
+    const configFile = first.contribution.containers?.[0].mounts[0].hostPath as string;
+    expect(fs.existsSync(configFile)).toBe(true);
+    await first.detach?.('host restart');
+    expect(fs.existsSync(configFile)).toBe(true);
+
+    const adopted = await provider.adoptSession(input);
     const unavailable = vi.fn();
-    session.onUnavailable?.(unavailable);
-    running = false;
-    poll?.();
-    expect(unavailable).toHaveBeenCalledWith("Iron Proxy became unavailable");
-    provider.stopHost();
+    adopted.onUnavailable?.(unavailable);
+    fs.rmSync(liveSettings.secretFile);
+    await vi.waitFor(() => expect(unavailable).toHaveBeenCalled(), { timeout: 3_000 });
+    await adopted.release('session ended');
+    expect(fs.existsSync(path.dirname(configFile))).toBe(false);
+    await provider.approvalBridge.stop();
+    fs.rmSync(project, { recursive: true, force: true });
   });
 });

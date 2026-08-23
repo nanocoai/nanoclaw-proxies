@@ -1,4 +1,5 @@
 {
-  "iron-proxy": "0.49.0",
-  "iron-proxy-image": "ironsh/iron-proxy:0.49.0@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da"
+  "iron-proxy-upstream-base": "7f947f2f8413c933851e7353471e07dffe24baa9",
+  "iron-proxy-fork-commit": "e6463ddefa0a68a1fbd06eb01a0b41f4369a01fe",
+  "iron-proxy-image": "ghcr.io/nanocoai/iron-proxy:e6463ddefa0a68a1fbd06eb01a0b41f4369a01fe@sha256:ceec991b7fd9458c2d6f8ba99b7453b16feb36b197413a950dc69f4c4f42294a"
 }

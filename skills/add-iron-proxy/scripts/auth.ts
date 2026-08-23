@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import * as p from "@clack/prompts";
 
-import { configureCredential } from "./setup.js";
+import { configureCredential, statePaths } from "./setup.js";
 
 type Method = "subscription" | "oauth" | "api" | "skip";
 
@@ -16,17 +16,9 @@ function answer<T>(value: T | symbol): T {
 }
 
 function existingCredential(): boolean {
-  const file = path.join(
-    process.cwd(),
-    "data",
-    "gateways",
-    "iron-proxy",
-    "secrets.env",
-  );
+  const file = statePaths().secretFile;
   if (!fs.existsSync(file)) return false;
-  const value = fs
-    .readFileSync(file, "utf8")
-    .match(/^IRON_UPSTREAM_CLAUDE=(.*)$/m)?.[1];
+  const value = fs.readFileSync(file, "utf8");
   return !!value && value !== "not-configured";
 }
 

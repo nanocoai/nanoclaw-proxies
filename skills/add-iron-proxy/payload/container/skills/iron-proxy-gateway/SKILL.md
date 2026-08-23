@@ -9,11 +9,11 @@ metadata:
 
 # Iron Proxy gateway
 
-Your outbound HTTP and HTTPS requests pass through Iron Proxy. The selected model credential is replaced at the proxy boundary; you receive only a useless placeholder.
+Your outbound HTTP and HTTPS requests pass through your session's Iron Proxy. A policy-selected credential request waits for human approval before the proxy inserts a credential. You receive only a useless placeholder.
 
 ## Policy failures
 
-A `403` from the proxy means the destination is not allowed. Respect the block and do not retry through another route. Tell the user which hostname was blocked.
+A `403` means the destination, request, or human approval was denied or timed out. Respect the block and do not retry through another route. Tell the user which hostname was blocked.
 
 An operator may allow that hostname on the NanoClaw host with:
 
@@ -27,5 +27,6 @@ Do not run this host command from the agent container.
 
 - Never ask for, print, or store a raw API key or OAuth token.
 - Never bypass the configured proxy or its CA validation.
+- Never treat a pending approval as granted.
 - Never claim a blocked destination is connected.
 - Treat proxy errors as policy or operator-configuration errors, not as permission to weaken TLS.
