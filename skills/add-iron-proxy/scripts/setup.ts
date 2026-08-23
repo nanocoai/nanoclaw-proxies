@@ -128,11 +128,11 @@ async function configuredPort(projectRoot: string): Promise<number> {
 }
 
 function docker(args: string[], options: { stdout?: boolean } = {}): string {
-  return execFileSync('docker', args, {
+  return (execFileSync('docker', args, {
     encoding: 'utf8',
     stdio: ['ignore', options.stdout ? 'pipe' : 'ignore', 'pipe'],
     timeout: 120_000,
-  }).trim();
+  }) ?? '').trim();
 }
 
 function ensureCA(projectRoot: string): void {
