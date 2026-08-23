@@ -45,10 +45,7 @@ const onecli = new OneCLI({ url: onecliUrl, apiKey: onecliApiKey });
 type OneCLIContribution = Omit<GatewayContribution, 'networkAccess'>;
 
 /** Argv → typed contribution. Exported for its tests; the grammar is closed. */
-export function contributionFromArgs(
-  args: readonly string[],
-  groupScope: string,
-): OneCLIContribution {
+export function contributionFromArgs(args: readonly string[], groupScope: string): OneCLIContribution {
   const env: Record<string, string> = {};
   const mounts: MountSpec[] = [];
   for (let i = 0; i < args.length; i += 2) {
@@ -79,10 +76,7 @@ export function contributionFromArgs(
   return { env, mounts };
 }
 
-export function withProviderEnv(
-  contribution: OneCLIContribution,
-  baseUrl = anthropicBaseUrl,
-): OneCLIContribution {
+export function withProviderEnv(contribution: OneCLIContribution, baseUrl = anthropicBaseUrl): OneCLIContribution {
   if (!baseUrl) return contribution;
   return {
     ...contribution,
