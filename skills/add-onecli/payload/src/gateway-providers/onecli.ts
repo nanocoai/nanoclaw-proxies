@@ -41,6 +41,14 @@ const onecliApiKey = process.env.ONECLI_API_KEY || env.ONECLI_API_KEY;
 const gatewayContainer = process.env.ONECLI_GATEWAY_CONTAINER || env.ONECLI_GATEWAY_CONTAINER || 'onecli';
 const anthropicBaseUrl = process.env.ANTHROPIC_BASE_URL || env.ANTHROPIC_BASE_URL;
 const onecli = new OneCLI({ url: onecliUrl, apiKey: onecliApiKey });
+const healthUrl = new URL('/v1/health', onecliUrl || 'https://api.onecli.sh').toString();
+const liveLeases = new Set<{
+  closed: boolean;
+  unavailable?: string;
+  notify?: (reason?: string) => void;
+}>();
+let healthTimer: NodeJS.Timeout | null = null;
+let probing = false;
 
 type OneCLIContribution = Omit<GatewayContribution, 'networkAccess'>;
 
@@ -88,6 +96,53 @@ export function withProviderEnv(contribution: OneCLIContribution, baseUrl = anth
   };
 }
 
+function stopHealthMonitor(): void {
+  if (healthTimer) clearInterval(healthTimer);
+  healthTimer = null;
+}
+
+async function probeHealth(): Promise<void> {
+  if (probing || liveLeases.size === 0) return;
+  probing = true;
+  try {
+    const response = await fetch(healthUrl, { signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) throw new Error(`status ${response.status}`);
+  } catch (err) {
+    const reason = 'OneCLI gateway unavailable';
+    log.error(reason, { err });
+    stopHealthMonitor();
+    for (const lease of liveLeases) {
+      lease.unavailable = reason;
+      lease.notify?.(reason);
+    }
+  } finally {
+    probing = false;
+  }
+}
+
+function monitorLease(): Pick<GatewaySession, 'onUnavailable' | 'detach' | 'release'> {
+  const lease: { closed: boolean; unavailable?: string; notify?: (reason?: string) => void } = { closed: false };
+  liveLeases.add(lease);
+  if (!healthTimer) {
+    healthTimer = setInterval(() => void probeHealth(), 5_000);
+    healthTimer.unref();
+  }
+  const close = () => {
+    if (lease.closed) return;
+    lease.closed = true;
+    liveLeases.delete(lease);
+    if (liveLeases.size === 0) stopHealthMonitor();
+  };
+  return {
+    onUnavailable(callback) {
+      lease.notify = callback;
+      if (lease.unavailable) callback(lease.unavailable);
+    },
+    detach: close,
+    release: close,
+  };
+}
+
 async function openSession({ key, groupName }: GatewaySessionInput): Promise<GatewaySession> {
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
@@ -105,6 +160,7 @@ async function openSession({ key, groupName }: GatewaySessionInput): Promise<Gat
     sessionId: key.sessionId,
   });
   return {
+    ...monitorLease(),
     contribution: {
       ...withProviderEnv(contributionFromArgs(args, key.agentGroupId)),
       networkAccess: {
@@ -112,8 +168,6 @@ async function openSession({ key, groupName }: GatewaySessionInput): Promise<Gat
         target: { kind: 'runtime', identity: gatewayContainer },
       },
     },
-    // OneCLI owns no per-session process or lease to revoke.
-    release() {},
   };
 }
 

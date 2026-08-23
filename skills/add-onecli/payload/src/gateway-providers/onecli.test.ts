@@ -1,5 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
 
+const sdk = vi.hoisted(() => ({
+  ensureAgent: vi.fn(async () => ({ created: false })),
+  applyContainerConfig: vi.fn(async (args: string[]) => {
+    args.push('-e', 'HTTPS_PROXY=http://host.docker.internal:15001');
+    return true;
+  }),
+}));
+
+vi.mock('@onecli-sh/sdk', () => ({
+  OneCLI: class {
+    ensureAgent = sdk.ensureAgent;
+    applyContainerConfig = sdk.applyContainerConfig;
+  },
+}));
+
 vi.mock('../log.js', () => ({
   log: {
     debug: vi.fn(),
@@ -24,6 +39,7 @@ vi.mock('../modules/approvals/onecli-approvals.js', () => ({
 }));
 
 import { contributionFromArgs, withProviderEnv } from './onecli.js';
+import { getGatewayProviderRegistration } from './gateway-provider-registry.js';
 
 describe('contributionFromArgs', () => {
   it('types the closed grammar the SDK emits: -e pairs and ro mounts', () => {
@@ -77,5 +93,33 @@ describe('contributionFromArgs', () => {
         ANTHROPIC_AUTH_TOKEN: 'gateway-managed',
       },
     });
+  });
+
+  it('owns one availability monitor for its live leases and fails them closed', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'));
+    const provider = getGatewayProviderRegistration('onecli')!.create();
+    const input = (sessionId: string) => ({
+      key: { installSlug: 'install', agentGroupId: 'g1', sessionId },
+      runtimeIdentity: `install/g1/${sessionId}`,
+      groupName: 'Group One',
+      capabilities: {} as never,
+    });
+    const first = await provider.prepareSession(input('s1'));
+    const second = await provider.adoptSession(input('s2'));
+    const unavailable = vi.fn();
+    first.onUnavailable?.(unavailable);
+    second.onUnavailable?.(unavailable);
+
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(unavailable).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+
+    await first.release('test');
+    await second.detach?.('test');
+    fetchMock.mockRestore();
+    vi.useRealTimers();
   });
 });
