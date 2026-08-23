@@ -4,9 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const { withLinuxHostGateway } = await import(
-  pathToFileURL(
-    path.resolve('.claude/skills/add-onecli/scripts/setup.ts'),
-  ).href
+  pathToFileURL(path.resolve('.claude/skills/add-onecli/scripts/setup.ts')).href
 );
 
 const compose = `services:
