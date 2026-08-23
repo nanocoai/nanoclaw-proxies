@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "default": "onecli",
+  "gateways": [
+    {
+      "kind": "onecli",
+      "label": "OneCLI",
+      "description": "Credential vault, request-time secret injection, and approval cards.",
+      "skillPath": "skills/add-onecli"
+    }
+  ]
+}

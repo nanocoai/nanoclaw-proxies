@@ -1,0 +1,4 @@
+interface:
+  display_name: "Add OneCLI gateway"
+  short_description: "Install NanoClaw's OneCLI gateway provider"
+  default_prompt: "Install or refresh OneCLI through NanoClaw's gateway seam and validate the result."

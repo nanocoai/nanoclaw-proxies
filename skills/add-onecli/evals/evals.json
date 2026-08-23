@@ -1,0 +1,17 @@
+{
+  "skill_name": "add-onecli",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Install OneCLI as the NanoClaw gateway and make sure approval cards still work.",
+      "expected_output": "Applies the pinned skill, performs one provider registration, validates runtime and approval tests, and selects OneCLI only after success.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Refresh the existing OneCLI integration without replacing the shared vault.",
+      "expected_output": "Reuses the existing gateway, refreshes skill-owned files and the exact SDK pin, and does not delete the shared application or credentials.",
+      "files": []
+    }
+  ]
+}
