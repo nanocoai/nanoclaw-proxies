@@ -17,9 +17,11 @@ payload/src/gateway-providers/onecli.test.ts -> src/gateway-providers/onecli.tes
 payload/src/gateway-providers/onecli-uninstall.ts -> src/gateway-providers/onecli-uninstall.ts
 payload/src/gateway-providers/onecli-uninstall.test.ts -> src/gateway-providers/onecli-uninstall.test.ts
 payload/src/modules/approvals/onecli-approvals.ts -> src/modules/approvals/onecli-approvals.ts
+payload/src/modules/approvals/onecli-approvals.test.ts -> src/modules/approvals/onecli-approvals.test.ts
 payload/src/modules/approvals/expired-card-instance.test.ts -> src/modules/approvals/expired-card-instance.test.ts
 payload/container/skills/onecli-gateway/SKILL.md -> container/skills/onecli-gateway/SKILL.md
 payload/container/skills/onecli-gateway/instructions.md -> container/skills/onecli-gateway/instructions.md
+payload/docs/onecli-upgrades.md -> docs/onecli-upgrades.md
 ```
 
 ## Register once
@@ -51,7 +53,7 @@ pnpm run build
 ```
 
 ```nc:run effect:test
-pnpm exec vitest run src/gateway-providers/onecli.test.ts src/gateway-providers/onecli-uninstall.test.ts src/modules/approvals/expired-card-instance.test.ts src/gateway-providers/gateway-provider-registry.test.ts
+pnpm exec vitest run src/gateway-providers/onecli.test.ts src/gateway-providers/onecli-uninstall.test.ts src/modules/approvals/onecli-approvals.test.ts src/modules/approvals/expired-card-instance.test.ts src/gateway-providers/gateway-provider-registry.test.ts
 ```
 
 The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=onecli` only after every directive above succeeds. Claude authentication is then completed through `scripts/auth.ts`; credentials never enter an agent container.
