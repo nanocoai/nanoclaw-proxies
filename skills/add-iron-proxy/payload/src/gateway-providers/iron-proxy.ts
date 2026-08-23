@@ -1,10 +1,10 @@
-import { execFileSync } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
-import { CONTAINER_RUNTIME_BIN } from '../container-runtime.js';
-import { readEnvFile } from '../env.js';
-import { getInstallSlug } from '../install-slug.js';
+import { CONTAINER_RUNTIME_BIN } from "../container-runtime.js";
+import { readEnvFile } from "../env.js";
+import { getInstallSlug } from "../install-slug.js";
 
 import {
   registerGatewayProvider,
@@ -12,19 +12,23 @@ import {
   type GatewayProvider,
   type GatewaySession,
   type GatewaySessionInput,
-} from './gateway-provider-registry.js';
+} from "./gateway-provider-registry.js";
 
 const SETTINGS = [
-  'NANOCLAW_IRON_PROXY_PORT',
-  'NANOCLAW_IRON_PROXY_CONTAINER',
-  'NANOCLAW_IRON_PROXY_CA_CERT',
-  'NANOCLAW_IRON_PROXY_AUTH_ENV',
-  'ANTHROPIC_BASE_URL',
+  "NANOCLAW_IRON_PROXY_PORT",
+  "NANOCLAW_IRON_PROXY_CONTAINER",
+  "NANOCLAW_IRON_PROXY_CA_CERT",
+  "NANOCLAW_IRON_PROXY_AUTH_ENV",
+  "ANTHROPIC_BASE_URL",
 ] as const;
 
-const AUTH_ENV_KEYS = new Set(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']);
-const CA_CONTAINER_PATH = '/run/nanoclaw-gateway/iron-proxy-ca.crt';
-const PLACEHOLDER = 'gateway-managed';
+const AUTH_ENV_KEYS = new Set([
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+]);
+const CA_CONTAINER_PATH = "/run/nanoclaw-gateway/iron-proxy-ca.crt";
+const PLACEHOLDER = "gateway-managed";
 
 export interface IronProxySettings {
   port: number;
@@ -39,26 +43,39 @@ export function readIronProxySettings(
   projectRoot = process.cwd(),
 ): IronProxySettings {
   const file = readEnvFile([...SETTINGS]);
-  const value = (key: (typeof SETTINGS)[number]): string => env[key]?.trim() || file[key]?.trim() || '';
-  const port = Number(value('NANOCLAW_IRON_PROXY_PORT'));
+  const value = (key: (typeof SETTINGS)[number]): string =>
+    env[key]?.trim() || file[key]?.trim() || "";
+  const port = Number(value("NANOCLAW_IRON_PROXY_PORT"));
   if (!Number.isInteger(port) || port < 1024 || port > 65535) {
-    throw new Error('Iron Proxy is not configured: NANOCLAW_IRON_PROXY_PORT must be a valid unprivileged port');
+    throw new Error(
+      "Iron Proxy is not configured: NANOCLAW_IRON_PROXY_PORT must be a valid unprivileged port",
+    );
   }
-  const authEnv = value('NANOCLAW_IRON_PROXY_AUTH_ENV') || 'ANTHROPIC_API_KEY';
-  if (!AUTH_ENV_KEYS.has(authEnv)) throw new Error(`Iron Proxy auth env is unsupported: ${authEnv}`);
-  const containerName = value('NANOCLAW_IRON_PROXY_CONTAINER') || `nanoclaw-iron-proxy-${getInstallSlug(projectRoot)}`;
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/.test(containerName)) throw new Error('Iron Proxy container name is invalid');
+  const authEnv = value("NANOCLAW_IRON_PROXY_AUTH_ENV") || "ANTHROPIC_API_KEY";
+  if (!AUTH_ENV_KEYS.has(authEnv))
+    throw new Error(`Iron Proxy auth env is unsupported: ${authEnv}`);
+  const containerName =
+    value("NANOCLAW_IRON_PROXY_CONTAINER") ||
+    `nanoclaw-iron-proxy-${getInstallSlug(projectRoot)}`;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/.test(containerName))
+    throw new Error("Iron Proxy container name is invalid");
   return {
     port,
     containerName,
     caCert:
-      value('NANOCLAW_IRON_PROXY_CA_CERT') || path.join(projectRoot, 'data', 'gateways', 'iron-proxy', 'ca.crt'),
+      value("NANOCLAW_IRON_PROXY_CA_CERT") ||
+      path.join(projectRoot, "data", "gateways", "iron-proxy", "ca.crt"),
     authEnv,
-    ...(value('ANTHROPIC_BASE_URL') ? { anthropicBaseUrl: value('ANTHROPIC_BASE_URL') } : {}),
+    ...(value("ANTHROPIC_BASE_URL")
+      ? { anthropicBaseUrl: value("ANTHROPIC_BASE_URL") }
+      : {}),
   };
 }
 
-export function ironProxyContribution(settings: IronProxySettings, groupScope: string): GatewayContribution {
+export function ironProxyContribution(
+  settings: IronProxySettings,
+  groupScope: string,
+): GatewayContribution {
   const proxy = `http://host.docker.internal:${settings.port}`;
   return {
     env: {
@@ -66,21 +83,23 @@ export function ironProxyContribution(settings: IronProxySettings, groupScope: s
       HTTPS_PROXY: proxy,
       http_proxy: proxy,
       https_proxy: proxy,
-      NO_PROXY: 'localhost,127.0.0.1,::1',
-      no_proxy: 'localhost,127.0.0.1,::1',
+      NO_PROXY: "localhost,127.0.0.1,::1",
+      no_proxy: "localhost,127.0.0.1,::1",
       NODE_EXTRA_CA_CERTS: CA_CONTAINER_PATH,
       SSL_CERT_FILE: CA_CONTAINER_PATH,
       CURL_CA_BUNDLE: CA_CONTAINER_PATH,
       GIT_SSL_CAINFO: CA_CONTAINER_PATH,
       [settings.authEnv]: PLACEHOLDER,
-      ...(settings.anthropicBaseUrl ? { ANTHROPIC_BASE_URL: settings.anthropicBaseUrl } : {}),
+      ...(settings.anthropicBaseUrl
+        ? { ANTHROPIC_BASE_URL: settings.anthropicBaseUrl }
+        : {}),
     },
     mounts: [
       {
-        class: 'allowlisted-extra',
+        class: "allowlisted-extra",
         hostPath: settings.caCert,
         containerPath: CA_CONTAINER_PATH,
-        mode: 'ro',
+        mode: "ro",
         groupScope,
       },
     ],
@@ -101,11 +120,15 @@ const defaultDeps: IronProxyDeps = {
   isRunning(containerName) {
     try {
       return (
-        execFileSync(CONTAINER_RUNTIME_BIN, ['inspect', '--format', '{{.State.Running}}', containerName], {
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'ignore'],
-          timeout: 5_000,
-        }).trim() === 'true'
+        execFileSync(
+          CONTAINER_RUNTIME_BIN,
+          ["inspect", "--format", "{{.State.Running}}", containerName],
+          {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+            timeout: 5_000,
+          },
+        ).trim() === "true"
       );
     } catch {
       return false;
@@ -116,7 +139,7 @@ const defaultDeps: IronProxyDeps = {
 };
 
 export class IronProxyProvider implements GatewayProvider {
-  readonly kind = 'iron-proxy';
+  readonly kind = "iron-proxy";
   readonly networkAccess;
   readonly #settings: IronProxySettings;
   readonly #unavailable = new Map<string, (reason?: string) => void>();
@@ -125,15 +148,21 @@ export class IronProxyProvider implements GatewayProvider {
   constructor(private readonly deps: IronProxyDeps = defaultDeps) {
     this.#settings = deps.settings();
     this.networkAccess = {
-      endpoint: 'host.docker.internal',
-      target: { kind: 'container' as const, name: this.#settings.containerName },
+      endpoint: "host.docker.internal",
+      target: {
+        kind: "container" as const,
+        name: this.#settings.containerName,
+      },
     };
   }
 
   ensureReady(): void {
-    if (!fs.existsSync(this.#settings.caCert)) throw new Error(`Iron Proxy CA is missing: ${this.#settings.caCert}`);
+    if (!fs.existsSync(this.#settings.caCert))
+      throw new Error(`Iron Proxy CA is missing: ${this.#settings.caCert}`);
     if (!this.deps.isRunning(this.#settings.containerName)) {
-      throw new Error(`Iron Proxy container is not running: ${this.#settings.containerName}`);
+      throw new Error(
+        `Iron Proxy container is not running: ${this.#settings.containerName}`,
+      );
     }
   }
 
@@ -141,7 +170,8 @@ export class IronProxyProvider implements GatewayProvider {
     if (this.#timer) return;
     this.#timer = this.deps.setInterval(() => {
       if (this.deps.isRunning(this.#settings.containerName)) return;
-      for (const callback of this.#unavailable.values()) callback('Iron Proxy became unavailable');
+      for (const callback of this.#unavailable.values())
+        callback("Iron Proxy became unavailable");
       this.#unavailable.clear();
     }, 2_000);
     this.#timer.unref?.();
@@ -165,7 +195,8 @@ export class IronProxyProvider implements GatewayProvider {
     this.ensureReady();
     return {
       contribution: ironProxyContribution(this.#settings, key.agentGroupId),
-      onUnavailable: (callback) => this.#unavailable.set(key.sessionId, callback),
+      onUnavailable: (callback) =>
+        this.#unavailable.set(key.sessionId, callback),
       detach: () => {
         this.#unavailable.delete(key.sessionId);
       },
@@ -177,7 +208,7 @@ export class IronProxyProvider implements GatewayProvider {
 }
 
 registerGatewayProvider({
-  kind: 'iron-proxy',
-  agentSkills: ['iron-proxy-gateway'],
+  kind: "iron-proxy",
+  agentSkills: ["iron-proxy-gateway"],
   create: () => new IronProxyProvider(),
 });
