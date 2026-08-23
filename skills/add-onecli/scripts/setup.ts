@@ -163,6 +163,39 @@ function removeLegacyOnecliContainers(): string {
   return out.join("\n");
 }
 
+export function withLinuxHostGateway(
+  compose: string,
+  platform = process.platform,
+): string {
+  if (
+    platform !== "linux" ||
+    compose.includes("host.docker.internal:host-gateway")
+  ) {
+    return compose;
+  }
+  const marker = "    container_name: onecli\n";
+  if (!compose.includes(marker)) {
+    throw new Error("OneCLI compose file has no onecli service marker");
+  }
+  return compose.replace(
+    marker,
+    `${marker}    extra_hosts:\n      - "host.docker.internal:host-gateway"\n`,
+  );
+}
+
+function ensureLocalGatewayHostAccess(): void {
+  if (process.platform !== "linux") return;
+  const composeFile = path.join(os.homedir(), ".onecli", "docker-compose.yml");
+  const current = fs.readFileSync(composeFile, "utf8");
+  const next = withLinuxHostGateway(current);
+  if (next === current) return;
+  fs.writeFileSync(composeFile, next);
+  execFileSync("docker", ["compose", "-f", composeFile, "up", "-d", "onecli"], {
+    cwd: path.dirname(composeFile),
+    stdio: "ignore",
+  });
+}
+
 function installOnecli(): { stdout: string; ok: boolean } {
   let stdout = "";
 
@@ -177,6 +210,12 @@ function installOnecli(): { stdout: string; ok: boolean } {
   if (!gw.ok) {
     log.error("OneCLI gateway install failed", { stderr: gw.stderr });
     return { stdout: stdout + (gw.stderr ?? ""), ok: false };
+  }
+  try {
+    ensureLocalGatewayHostAccess();
+  } catch (err) {
+    log.error("OneCLI gateway host mapping failed", { err });
+    return { stdout, ok: false };
   }
 
   const cli = installOnecliCliDirect();
