@@ -221,11 +221,15 @@ function installOnecli(): { stdout: string; ok: boolean } {
     return { stdout: stdout + (gw.stderr ?? ""), ok: false };
   }
   try {
+    const gatewayUrl = extractUrlFromOutput(gw.stdout);
+    if (!gatewayUrl) throw new Error("OneCLI installer did not report its URL");
+    const onecliEnv = path.join(os.homedir(), ".onecli", ".env");
     writeEnvVar(
       "ONECLI_VERSION",
       ONECLI_GATEWAY_VERSION,
-      path.join(os.homedir(), ".onecli", ".env"),
+      onecliEnv,
     );
+    writeEnvVar("ONECLI_BIND_HOST", new URL(gatewayUrl).hostname, onecliEnv);
     ensureLocalGatewayHostAccess();
   } catch (err) {
     log.error("OneCLI gateway host mapping failed", { err });

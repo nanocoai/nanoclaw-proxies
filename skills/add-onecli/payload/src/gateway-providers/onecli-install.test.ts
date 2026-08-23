@@ -15,11 +15,11 @@ const compose = `services:
 `;
 
 describe('OneCLI compose setup', () => {
-  it('persists the exact gateway image pin', () => {
-    expect(withEnvVar('ONECLI_VERSION=latest\nKEEP=yes\n', 'ONECLI_VERSION', '1.41.0')).toBe(
-      'ONECLI_VERSION=1.41.0\nKEEP=yes\n',
+  it('persists the exact gateway image pin and bind host', () => {
+    const pinned = withEnvVar('ONECLI_VERSION=latest\nKEEP=yes\n', 'ONECLI_VERSION', '1.41.0');
+    expect(withEnvVar(pinned, 'ONECLI_BIND_HOST', '172.17.0.1')).toBe(
+      'ONECLI_VERSION=1.41.0\nKEEP=yes\nONECLI_BIND_HOST=172.17.0.1\n',
     );
-    expect(withEnvVar('', 'ONECLI_VERSION', '1.41.0')).toBe('ONECLI_VERSION=1.41.0\n');
   });
 
   it('adds the Linux host gateway once', () => {
