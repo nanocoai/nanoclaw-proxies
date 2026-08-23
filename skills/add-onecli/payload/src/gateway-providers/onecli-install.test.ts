@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-const { withLinuxHostGateway } = await import(
+const { withEnvVar, withLinuxHostGateway } = await import(
   pathToFileURL(path.resolve('.claude/skills/add-onecli/scripts/setup.ts')).href
 );
 
@@ -15,6 +15,13 @@ const compose = `services:
 `;
 
 describe('OneCLI compose setup', () => {
+  it('persists the exact gateway image pin', () => {
+    expect(withEnvVar('ONECLI_VERSION=latest\nKEEP=yes\n', 'ONECLI_VERSION', '1.41.0')).toBe(
+      'ONECLI_VERSION=1.41.0\nKEEP=yes\n',
+    );
+    expect(withEnvVar('', 'ONECLI_VERSION', '1.41.0')).toBe('ONECLI_VERSION=1.41.0\n');
+  });
+
   it('adds the Linux host gateway once', () => {
     const configured = withLinuxHostGateway(compose, 'linux');
     expect(configured).toContain('extra_hosts:\n      - "host.docker.internal:host-gateway"');

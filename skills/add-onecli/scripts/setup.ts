@@ -92,16 +92,25 @@ function ensureShellProfilePath(): void {
   }
 }
 
-function writeEnvVar(name: string, value: string): void {
-  const envFile = path.join(process.cwd(), ".env");
-  let content = fs.existsSync(envFile) ? fs.readFileSync(envFile, "utf-8") : "";
+export function withEnvVar(
+  content: string,
+  name: string,
+  value: string,
+): string {
   const re = new RegExp(`^${name}=.*$`, "m");
   if (re.test(content)) {
-    content = content.replace(re, `${name}=${value}`);
-  } else {
-    content = content.trimEnd() + (content ? "\n" : "") + `${name}=${value}\n`;
+    return content.replace(re, `${name}=${value}`);
   }
-  fs.writeFileSync(envFile, content);
+  return content.trimEnd() + (content ? "\n" : "") + `${name}=${value}\n`;
+}
+
+function writeEnvVar(
+  name: string,
+  value: string,
+  envFile = path.join(process.cwd(), ".env"),
+): void {
+  const content = fs.existsSync(envFile) ? fs.readFileSync(envFile, "utf-8") : "";
+  fs.writeFileSync(envFile, withEnvVar(content, name, value));
 }
 
 function writeEnvOnecliUrl(url: string): void {
@@ -212,6 +221,11 @@ function installOnecli(): { stdout: string; ok: boolean } {
     return { stdout: stdout + (gw.stderr ?? ""), ok: false };
   }
   try {
+    writeEnvVar(
+      "ONECLI_VERSION",
+      ONECLI_GATEWAY_VERSION,
+      path.join(os.homedir(), ".onecli", ".env"),
+    );
     ensureLocalGatewayHostAccess();
   } catch (err) {
     log.error("OneCLI gateway host mapping failed", { err });
