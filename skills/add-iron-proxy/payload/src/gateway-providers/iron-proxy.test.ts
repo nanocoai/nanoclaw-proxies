@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { parse as parseYaml } from 'yaml';
@@ -105,7 +106,7 @@ describe('Iron Proxy provider', () => {
   });
 
   it('uses one idempotent ensure, preserves on abort, and revokes only explicitly', async () => {
-    const project = fs.mkdtempSync(path.join('/private/tmp', 'ip-'));
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'ip-'));
     const liveSettings: IronProxySettings = {
       ...settings,
       materialRoot: path.join(project, 'materials'),
