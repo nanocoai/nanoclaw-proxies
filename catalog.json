@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "default": "iron-proxy",
+  "default": "onecli",
   "gateways": [
     {
       "kind": "onecli",

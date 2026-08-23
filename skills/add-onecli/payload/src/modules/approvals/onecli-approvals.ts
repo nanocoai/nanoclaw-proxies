@@ -18,34 +18,31 @@
  * Startup sweep marks leftover cards as timed out after a host restart and
  * drops the rows.
  */
-import {
-  OneCLI,
-  type ApprovalRequest,
-  type ManualApprovalHandle,
-} from "@onecli-sh/sdk";
+import { OneCLI, type ApprovalRequest, type ManualApprovalHandle } from '@onecli-sh/sdk';
 
-import { pickApprovalDelivery, pickApprover } from "./primitive.js";
-import { getAgentGroup } from "../../db/agent-groups.js";
+import { pickApprovalDelivery, pickApprover } from './primitive.js';
+import { getAgentGroup } from '../../db/agent-groups.js';
 import {
   createPendingApproval,
   deletePendingApproval,
   getPendingApproval,
   getPendingApprovalsByAction,
   transitionPendingApprovalStatus,
-} from "../../db/sessions.js";
-import type { ChannelDeliveryAdapter } from "../../delivery.js";
-import { readEnvFile } from "../../env.js";
-import { log } from "../../log.js";
-import type { ResponsePayload } from "../../response-registry.js";
-import type { PendingApproval } from "../../types.js";
-import { isAuthorizedApprovalClick } from "./response-handler.js";
+} from '../../db/sessions.js';
+import type { ChannelDeliveryAdapter } from '../../delivery.js';
+import { readEnvFile } from '../../env.js';
+import { log } from '../../log.js';
+import type { PendingApproval } from '../../types.js';
+import type { QuestionRender } from '../../channels/question-render-registry.js';
+import type { ResponsePayload } from '../../response-registry.js';
+import { isAuthorizedApprovalClick } from './response-handler.js';
 
-export const ONECLI_ACTION = "onecli_credential";
+export const ONECLI_ACTION = 'onecli_credential';
 
-type Decision = "approve" | "deny";
-type ExpiryReason = "no response" | "host restarted";
+type Decision = 'approve' | 'deny';
+type ExpiryReason = 'no response' | 'host restarted';
 
-const env = readEnvFile(["ONECLI_URL", "ONECLI_API_KEY"]);
+const env = readEnvFile(['ONECLI_URL', 'ONECLI_API_KEY']);
 const onecli = new OneCLI({
   url: process.env.ONECLI_URL || env.ONECLI_URL,
   apiKey: process.env.ONECLI_API_KEY || env.ONECLI_API_KEY,
@@ -59,26 +56,6 @@ interface PendingState {
 const pending = new Map<string, PendingState>();
 let handle: ManualApprovalHandle | null = null;
 let adapterRef: ChannelDeliveryAdapter | null = null;
-
-/** Claims only this provider's approval namespace. */
-export async function handleOneCLIApprovalResponse(
-  payload: ResponsePayload,
-): Promise<boolean> {
-  const approval = await getPendingApproval(payload.questionId);
-  if (!approval || approval.action !== ONECLI_ACTION) return false;
-  if (!(await isAuthorizedApprovalClick(approval, payload))) {
-    log.warn("Ignoring unauthorized OneCLI approval response", {
-      approvalId: approval.approval_id,
-      userId: payload.userId,
-      channelType: payload.channelType,
-    });
-    return true;
-  }
-  if (!(await resolveOneCLIApproval(payload.questionId, payload.value))) {
-    await deletePendingApproval(payload.questionId);
-  }
-  return true;
-}
 
 /**
  * Generate a short approval id for card buttons.
@@ -98,18 +75,15 @@ function shortApprovalId(): string {
 }
 
 /** Called from the approvals response handler when a card button is clicked. */
-export async function resolveOneCLIApproval(
-  approvalId: string,
-  selectedOption: string,
-): Promise<boolean> {
+export async function resolveOneCLIApproval(approvalId: string, selectedOption: string): Promise<boolean> {
   const state = pending.get(approvalId);
   if (!state) return false;
 
-  const decision: Decision = selectedOption === "approve" ? "approve" : "deny";
+  const decision: Decision = selectedOption === 'approve' ? 'approve' : 'deny';
   const claimed = await transitionPendingApprovalStatus(
     approvalId,
-    "pending",
-    decision === "approve" ? "approved" : "rejected",
+    'pending',
+    decision === 'approve' ? 'approved' : 'rejected',
   );
   if (!claimed) return false;
   pending.delete(approvalId);
@@ -119,32 +93,26 @@ export async function resolveOneCLIApproval(
   await deletePendingApproval(approvalId);
 
   state.resolve(decision);
-  log.info("OneCLI approval resolved", { approvalId, decision });
+  log.info('OneCLI approval resolved', { approvalId, decision });
   return true;
 }
 
-export function startOneCLIApprovalHandler(
-  deliveryAdapter: ChannelDeliveryAdapter,
-): void {
+export function startOneCLIApprovalHandler(deliveryAdapter: ChannelDeliveryAdapter): void {
   if (handle) return;
   adapterRef = deliveryAdapter;
 
   // Sweep any rows left over from a previous process.
-  sweepStaleApprovals().catch((err) =>
-    log.error("OneCLI approval sweep failed", { err }),
-  );
+  sweepStaleApprovals().catch((err) => log.error('OneCLI approval sweep failed', { err }));
 
-  handle = onecli.configureManualApproval(
-    async (request: ApprovalRequest): Promise<Decision> => {
-      try {
-        return await handleRequest(request);
-      } catch (err) {
-        log.error("OneCLI approval handler errored", { id: request.id, err });
-        return "deny";
-      }
-    },
-  );
-  log.info("OneCLI approval handler started");
+  handle = onecli.configureManualApproval(async (request: ApprovalRequest): Promise<Decision> => {
+    try {
+      return await handleRequest(request);
+    } catch (err) {
+      log.error('OneCLI approval handler errored', { id: request.id, err });
+      return 'deny';
+    }
+  });
+  log.info('OneCLI approval handler started');
 }
 
 export function stopOneCLIApprovalHandler(): void {
@@ -152,64 +120,91 @@ export function stopOneCLIApprovalHandler(): void {
   handle = null;
   for (const state of pending.values()) {
     clearTimeout(state.timer);
+    state.resolve('deny');
   }
   pending.clear();
   adapterRef = null;
 }
 
+export async function handleOneCLIApprovalResponse(payload: ResponsePayload): Promise<boolean> {
+  try {
+    const approval = await getPendingApproval(payload.questionId);
+    if (!approval || approval.action !== ONECLI_ACTION) return false;
+    if (!(await isAuthorizedApprovalClick(approval, payload))) return true;
+    if (!(await resolveOneCLIApproval(payload.questionId, payload.value))) {
+      await deletePendingApproval(payload.questionId);
+    }
+    return true;
+  } catch (err) {
+    const state = pending.get(payload.questionId);
+    if (state) {
+      pending.delete(payload.questionId);
+      clearTimeout(state.timer);
+      state.resolve('deny');
+    }
+    log.error('OneCLI approval response failed closed', { approvalId: payload.questionId, err });
+    return true;
+  }
+}
+
+export async function renderOneCLIApprovalQuestion(questionId: string): Promise<QuestionRender | undefined> {
+  const approval = await getPendingApproval(questionId);
+  if (!approval || approval.action !== ONECLI_ACTION || !approval.title || !approval.options_json) return undefined;
+  return {
+    title: approval.title,
+    question: approval.question ?? undefined,
+    options: JSON.parse(approval.options_json) as QuestionRender['options'],
+  };
+}
+
 async function handleRequest(request: ApprovalRequest): Promise<Decision> {
-  if (!adapterRef) return "deny";
+  if (!adapterRef) return 'deny';
 
   // Originating agent group is carried on the request via OneCLI's agent
   // identifier (set by container-runner.ts to agentGroup.id). Use it as
   // the scope for approver selection: admin @ group → global admin → owner.
-  const originGroup = request.agent.externalId
-    ? await getAgentGroup(request.agent.externalId)
-    : undefined;
+  const originGroup = request.agent.externalId ? await getAgentGroup(request.agent.externalId) : undefined;
   const agentGroupId = originGroup?.id ?? null;
   const approvers = await pickApprover(agentGroupId);
   if (approvers.length === 0) {
-    log.warn("OneCLI approval auto-denied: no eligible approver", {
+    log.warn('OneCLI approval auto-denied: no eligible approver', {
       id: request.id,
       host: request.host,
       agent: request.agent.externalId,
     });
-    return "deny";
+    return 'deny';
   }
 
   // No origin channel preference — OneCLI requests don't carry one. First
   // approver with a reachable DM wins.
-  const target = await pickApprovalDelivery(approvers, "");
+  const target = await pickApprovalDelivery(approvers, '');
   if (!target) {
-    log.warn("OneCLI approval auto-denied: no DM channel for any approver", {
+    log.warn('OneCLI approval auto-denied: no DM channel for any approver', {
       id: request.id,
       approvers,
     });
-    return "deny";
+    return 'deny';
   }
 
   // Use a short id for the card/button so Chat SDK's Telegram adapter can
   // fit everything inside the 64-byte callback_data limit. The OneCLI
   // request.id stays in the payload for audit.
   const approvalId = shortApprovalId();
-  const question = buildQuestion(
-    request,
-    originGroup?.name ?? request.agent.name,
-  );
+  const question = buildQuestion(request, originGroup?.name ?? request.agent.name);
 
-  const onecliTitle = "Credentials Request";
+  const onecliTitle = 'Credentials Request';
   const onecliOptions = [
     {
-      label: "Approve",
-      selectedLabel: "✅ Approved",
-      value: "approve",
-      style: "primary" as const,
+      label: 'Approve',
+      selectedLabel: '✅ Approved',
+      value: 'approve',
+      style: 'primary' as const,
     },
     {
-      label: "Reject",
-      selectedLabel: "❌ Rejected",
-      value: "reject",
-      style: "danger" as const,
+      label: 'Reject',
+      selectedLabel: '❌ Rejected',
+      value: 'reject',
+      style: 'danger' as const,
     },
   ];
   let platformMessageId: string | undefined;
@@ -218,9 +213,9 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
       target.messagingGroup.channel_type,
       target.messagingGroup.platform_id,
       null,
-      "chat-sdk",
+      'chat-sdk',
       JSON.stringify({
-        type: "ask_question",
+        type: 'ask_question',
         questionId: approvalId,
         title: onecliTitle,
         question,
@@ -234,12 +229,12 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
       target.messagingGroup.instance,
     );
   } catch (err) {
-    log.error("Failed to deliver OneCLI approval card", {
+    log.error('Failed to deliver OneCLI approval card', {
       approvalId,
       oneCliRequestId: request.id,
       err,
     });
-    return "deny";
+    return 'deny';
   }
 
   await createPendingApproval({
@@ -263,7 +258,7 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
     instance: target.messagingGroup.instance ?? null,
     platform_message_id: platformMessageId ?? null,
     expires_at: request.expiresAt,
-    status: "pending",
+    status: 'pending',
     title: onecliTitle,
     question,
     options_json: JSON.stringify(onecliOptions),
@@ -278,68 +273,47 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
     const timer = setTimeout(() => {
       if (!pending.has(approvalId)) return;
       pending.delete(approvalId);
-      expireApproval(approvalId, "no response").catch((err) =>
-        log.error("Failed to mark OneCLI approval expired", {
+      expireApproval(approvalId, 'no response').catch((err) =>
+        log.error('Failed to mark OneCLI approval expired', {
           approvalId,
           err,
         }),
       );
-      resolve("deny");
+      resolve('deny');
     }, timeoutMs);
 
     pending.set(approvalId, { resolve, timer });
   });
 }
 
-async function expireApproval(
-  approvalId: string,
-  reason: ExpiryReason,
-): Promise<void> {
-  const rows = (await getPendingApprovalsByAction(ONECLI_ACTION)).filter(
-    (r) => r.approval_id === approvalId,
-  );
+async function expireApproval(approvalId: string, reason: ExpiryReason): Promise<void> {
+  const rows = (await getPendingApprovalsByAction(ONECLI_ACTION)).filter((r) => r.approval_id === approvalId);
   const row = rows[0];
   if (!row) return;
 
-  if (
-    !(await transitionPendingApprovalStatus(approvalId, "pending", "expired"))
-  )
-    return;
+  if (!(await transitionPendingApprovalStatus(approvalId, 'pending', 'expired'))) return;
   await editCardExpired(row, reason);
   await deletePendingApproval(approvalId);
-  log.info("OneCLI approval expired", { approvalId, reason });
+  log.info('OneCLI approval expired', { approvalId, reason });
 }
 
 /** Exported for tests — the sweep and the expiry timer are its only callers. */
-export async function editCardExpired(
-  row: PendingApproval,
-  reason: ExpiryReason,
-): Promise<void> {
-  if (
-    !adapterRef ||
-    !row.platform_message_id ||
-    !row.channel_type ||
-    !row.platform_id
-  )
-    return;
+export async function editCardExpired(row: PendingApproval, reason: ExpiryReason): Promise<void> {
+  if (!adapterRef || !row.platform_message_id || !row.channel_type || !row.platform_id) return;
   const resolution =
-    reason === "no response"
-      ? "⏱️ Timed out — no response"
-      : "⏱️ Timed out — host restarted before resolution";
+    reason === 'no response' ? '⏱️ Timed out — no response' : '⏱️ Timed out — host restarted before resolution';
   try {
     await adapterRef.deliver(
       row.channel_type,
       row.platform_id,
       null,
-      "chat-sdk",
+      'chat-sdk',
       JSON.stringify({
-        operation: "edit",
+        operation: 'edit',
         messageId: row.platform_message_id,
         // Native adapters that cannot edit rich cards treat this as a
         // terminal follow-up; Chat SDK adapters prefer terminalCard below.
-        text: [row.title, row.question, resolution]
-          .filter(Boolean)
-          .join("\n\n"),
+        text: [row.title, row.question, resolution].filter(Boolean).join('\n\n'),
         terminalCard: {
           title: row.title,
           question: row.question,
@@ -355,7 +329,7 @@ export async function editCardExpired(
     // Louder than a warn: the row is deleted straight after, so a swallowed
     // failure leaves a card showing live Approve/Reject buttons that resolve
     // nothing, with no other trace that it happened.
-    log.error("Failed to edit expired OneCLI approval card", {
+    log.error('Failed to edit expired OneCLI approval card', {
       approvalId: row.approval_id,
       err,
     });
@@ -365,11 +339,11 @@ export async function editCardExpired(
 async function sweepStaleApprovals(): Promise<void> {
   const rows = await getPendingApprovalsByAction(ONECLI_ACTION);
   if (rows.length === 0) return;
-  log.info("Sweeping stale OneCLI approvals from previous process", {
+  log.info('Sweeping stale OneCLI approvals from previous process', {
     count: rows.length,
   });
   for (const row of rows) {
-    await editCardExpired(row, "host restarted");
+    await editCardExpired(row, 'host restarted');
     await deletePendingApproval(row.approval_id);
   }
 }
@@ -387,8 +361,7 @@ const SUMMARY_VALUE_EXCERPT_CHARS = 900;
 function buildQuestion(request: ApprovalRequest, agentName: string): string {
   const lines = [`*Agent:* ${agentName}`];
 
-  const summary = (request as ApprovalRequest & { summary?: ApprovalSummary })
-    .summary;
+  const summary = (request as ApprovalRequest & { summary?: ApprovalSummary }).summary;
   if (summary?.details?.length) {
     if (summary.action) lines.push(`*Action:* ${summary.action}`);
     // A render bug here must never decide the request: handleRequest's catch
@@ -397,33 +370,24 @@ function buildQuestion(request: ApprovalRequest, agentName: string): string {
     // section limit or delivery itself fails.
     let budget = 2600;
     for (const { label, value } of summary.details) {
-      const raw =
-        typeof value === "string"
-          ? value
-          : (JSON.stringify(value) ?? String(value));
+      const raw = typeof value === 'string' ? value : (JSON.stringify(value) ?? String(value));
       const cap = Math.min(SUMMARY_VALUE_EXCERPT_CHARS, Math.max(0, budget));
       if (cap === 0) {
-        lines.push(
-          `_…${summary.details.length} field(s) omitted for length — see the audit payload._`,
-        );
+        lines.push(`_…${summary.details.length} field(s) omitted for length — see the audit payload._`);
         break;
       }
       const v = raw.length > cap ? `${raw.slice(0, cap)}…` : raw;
       budget -= v.length + String(label).length + 8;
       // Multi-line values (message bodies) read better fenced; short labeled
       // fields (To, Subject) inline.
-      if (v.includes("\n")) lines.push(`*${label}:*`, "```", v, "```");
+      if (v.includes('\n')) lines.push(`*${label}:*`, '```', v, '```');
       else lines.push(`*${label}:* ${v}`);
     }
   } else if (request.bodyPreview) {
-    lines.push(
-      "```",
-      request.bodyPreview.slice(0, SUMMARY_VALUE_EXCERPT_CHARS * 2),
-      "```",
-    );
+    lines.push('```', request.bodyPreview.slice(0, SUMMARY_VALUE_EXCERPT_CHARS * 2), '```');
     lines.push(`_${request.method} ${request.host}${request.path}_`);
   } else {
     lines.push(`_${request.method} ${request.host}${request.path}_`);
   }
-  return lines.join("\n");
+  return lines.join('\n');
 }

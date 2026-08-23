@@ -15,68 +15,58 @@
  * refuses the spawn: nothing gets to ride raw argv around the spec again. A
  * typed SDK config surface is the successor that deletes this parser.
  */
-import { OneCLI } from "@onecli-sh/sdk";
+import { OneCLI } from '@onecli-sh/sdk';
 
-import type { MountSpec } from "../drivers/types.js";
-import { readEnvFile } from "../env.js";
-import { log } from "../log.js";
+import type { MountSpec } from '../drivers/types.js';
+import { readEnvFile } from '../env.js';
+import { log } from '../log.js';
 import {
   handleOneCLIApprovalResponse,
+  renderOneCLIApprovalQuestion,
   startOneCLIApprovalHandler,
   stopOneCLIApprovalHandler,
-} from "../modules/approvals/onecli-approvals.js";
+} from '../modules/approvals/onecli-approvals.js';
 
 import {
   registerGatewayProvider,
   type GatewayContribution,
   type GatewaySession,
   type GatewaySessionInput,
-} from "./gateway-provider-registry.js";
-import { onecliUninstall } from "./onecli-uninstall.js";
+} from './gateway-provider-registry.js';
+import { onecliUninstall } from './onecli-uninstall.js';
 
-const env = readEnvFile([
-  "ONECLI_URL",
-  "ONECLI_API_KEY",
-  "ONECLI_GATEWAY_CONTAINER",
-  "ANTHROPIC_BASE_URL",
-]);
+const env = readEnvFile(['ONECLI_URL', 'ONECLI_API_KEY', 'ONECLI_GATEWAY_CONTAINER', 'ANTHROPIC_BASE_URL']);
 const onecliUrl = process.env.ONECLI_URL || env.ONECLI_URL;
 const onecliApiKey = process.env.ONECLI_API_KEY || env.ONECLI_API_KEY;
-const gatewayContainer =
-  process.env.ONECLI_GATEWAY_CONTAINER ||
-  env.ONECLI_GATEWAY_CONTAINER ||
-  "onecli";
-const anthropicBaseUrl =
-  process.env.ANTHROPIC_BASE_URL || env.ANTHROPIC_BASE_URL;
+const gatewayContainer = process.env.ONECLI_GATEWAY_CONTAINER || env.ONECLI_GATEWAY_CONTAINER || 'onecli';
+const anthropicBaseUrl = process.env.ANTHROPIC_BASE_URL || env.ANTHROPIC_BASE_URL;
 const onecli = new OneCLI({ url: onecliUrl, apiKey: onecliApiKey });
+
+type OneCLIContribution = Omit<GatewayContribution, 'networkAccess'>;
 
 /** Argv → typed contribution. Exported for its tests; the grammar is closed. */
 export function contributionFromArgs(
   args: readonly string[],
   groupScope: string,
-): GatewayContribution {
+): OneCLIContribution {
   const env: Record<string, string> = {};
   const mounts: MountSpec[] = [];
   for (let i = 0; i < args.length; i += 2) {
     const flag = args[i];
     const value = args[i + 1];
-    if (flag === "-e" && value?.includes("=")) {
-      const eq = value.indexOf("=");
+    if (flag === '-e' && value?.includes('=')) {
+      const eq = value.indexOf('=');
       env[value.slice(0, eq)] = value.slice(eq + 1);
       continue;
     }
-    if (flag === "-v" && value) {
-      const parts = value.split(":");
-      if (
-        parts.length >= 2 &&
-        parts.length <= 3 &&
-        (parts[2] === undefined || parts[2] === "ro")
-      ) {
+    if (flag === '-v' && value) {
+      const parts = value.split(':');
+      if (parts.length >= 2 && parts.length <= 3 && (parts[2] === undefined || parts[2] === 'ro')) {
         mounts.push({
-          class: "allowlisted-extra",
+          class: 'allowlisted-extra',
           hostPath: parts[0],
           containerPath: parts[1],
-          mode: parts[2] === "ro" ? "ro" : "rw",
+          mode: parts[2] === 'ro' ? 'ro' : 'rw',
           groupScope,
         });
         continue;
@@ -84,32 +74,27 @@ export function contributionFromArgs(
     }
     // Fail-closed on grammar drift: an SDK that starts emitting a flag this
     // parser cannot type must break the spawn loudly, not smuggle argv.
-    throw new Error(
-      `OneCLI gateway emitted argv this seam cannot type: '${flag} ${value ?? ""}'`,
-    );
+    throw new Error(`OneCLI gateway emitted argv this seam cannot type: '${flag} ${value ?? ''}'`);
   }
   return { env, mounts };
 }
 
 export function withProviderEnv(
-  contribution: GatewayContribution,
+  contribution: OneCLIContribution,
   baseUrl = anthropicBaseUrl,
-): GatewayContribution {
+): OneCLIContribution {
   if (!baseUrl) return contribution;
   return {
     ...contribution,
     env: {
       ...contribution.env,
       ANTHROPIC_BASE_URL: baseUrl,
-      ANTHROPIC_AUTH_TOKEN: "gateway-managed",
+      ANTHROPIC_AUTH_TOKEN: 'gateway-managed',
     },
   };
 }
 
-async function openSession({
-  key,
-  groupName,
-}: GatewaySessionInput): Promise<GatewaySession> {
+async function openSession({ key, groupName }: GatewaySessionInput): Promise<GatewaySession> {
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
   await onecli.ensureAgent({ name: groupName, identifier: key.agentGroupId });
@@ -119,38 +104,37 @@ async function openSession({
     agent: key.agentGroupId,
   });
   if (!applied) {
-    throw new Error(
-      "OneCLI gateway not applied — refusing to spawn container without credentials",
-    );
+    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
-  const contribution = withProviderEnv(
-    contributionFromArgs(args, key.agentGroupId),
-  );
-  log.info("OneCLI gateway applied", {
+  log.info('OneCLI gateway applied', {
     agentGroupId: key.agentGroupId,
     sessionId: key.sessionId,
   });
   return {
-    contribution,
+    contribution: {
+      ...withProviderEnv(contributionFromArgs(args, key.agentGroupId)),
+      networkAccess: {
+        endpoint: 'host.docker.internal',
+        target: { kind: 'runtime', identity: gatewayContainer },
+      },
+    },
     // OneCLI owns no per-session process or lease to revoke.
     release() {},
   };
 }
 
 registerGatewayProvider({
-  kind: "onecli",
-  agentSkills: ["onecli-gateway"],
+  kind: 'onecli',
+  agentSkills: ['onecli-gateway'],
   create: () => ({
-    kind: "onecli",
-    networkAccess: {
-      endpoint: "host.docker.internal",
-      target: { kind: "container", name: gatewayContainer },
+    kind: 'onecli',
+    approvalBridge: {
+      start: ({ deliveryAdapter }) => startOneCLIApprovalHandler(deliveryAdapter),
+      stop: stopOneCLIApprovalHandler,
+      handleResponse: handleOneCLIApprovalResponse,
+      renderQuestion: renderOneCLIApprovalQuestion,
     },
     uninstall: onecliUninstall,
-    responseHandler: handleOneCLIApprovalResponse,
-    startHost: ({ deliveryAdapter }) =>
-      startOneCLIApprovalHandler(deliveryAdapter),
-    stopHost: stopOneCLIApprovalHandler,
     prepareSession: openSession,
     adoptSession: openSession,
   }),
