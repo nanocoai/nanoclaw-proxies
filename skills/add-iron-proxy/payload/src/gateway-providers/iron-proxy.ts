@@ -166,8 +166,12 @@ export class IronProxyProvider implements GatewayProvider {
     return {
       contribution: ironProxyContribution(this.#settings, key.agentGroupId),
       onUnavailable: (callback) => this.#unavailable.set(key.sessionId, callback),
-      detach: () => this.#unavailable.delete(key.sessionId),
-      release: () => this.#unavailable.delete(key.sessionId),
+      detach: () => {
+        this.#unavailable.delete(key.sessionId);
+      },
+      release: () => {
+        this.#unavailable.delete(key.sessionId);
+      },
     };
   }
 }
