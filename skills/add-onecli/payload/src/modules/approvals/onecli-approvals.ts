@@ -100,11 +100,17 @@ export async function resolveOneCLIApproval(approvalId: string, selectedOption: 
 export function startOneCLIApprovalHandler(deliveryAdapter: ChannelDeliveryAdapter): void {
   if (handle) return;
   adapterRef = deliveryAdapter;
+  const startedAt = Date.now();
 
   // Sweep any rows left over from a previous process.
   sweepStaleApprovals().catch((err) => log.error('OneCLI approval sweep failed', { err }));
 
   handle = onecli.configureManualApproval(async (request: ApprovalRequest): Promise<Decision> => {
+    const createdAt = Date.parse(request.createdAt);
+    if (!Number.isFinite(createdAt) || createdAt < startedAt) {
+      log.warn('OneCLI approval denied after bridge restart', { id: request.id });
+      return 'deny';
+    }
     try {
       return await handleRequest(request);
     } catch (err) {

@@ -141,5 +141,11 @@ describe('OneCLI approval bridge', () => {
     const restarted = await heldRequest();
     stopOneCLIApprovalHandler();
     await expect(restarted.decision).resolves.toBe('deny');
+
+    const stale = request();
+    stale.createdAt = new Date(Date.now() - 1_000).toISOString();
+    startOneCLIApprovalHandler(adapter);
+    await expect(state.callback!(stale)).resolves.toBe('deny');
+    await vi.waitFor(() => expect(state.rows.size).toBe(0));
   });
 });
