@@ -11,9 +11,10 @@ import { IronProxyApprovalBridge, type IronApprovalIdentity } from './iron-proxy
 import {
   registerGatewayProvider,
   type GatewayContribution,
-  type GatewayProvider,
-  type GatewaySession,
+  type GatewayOwnedSession,
+  type GatewayProviderDefinition,
   type GatewaySessionInput,
+  type GatewaySessionLease,
 } from './gateway-provider-registry.js';
 
 const SETTINGS = [
@@ -213,8 +214,7 @@ function writeSessionMaterial(settings: IronProxySettings, input: GatewaySession
   return config;
 }
 
-function assertReady(settings: IronProxySettings, bridge: IronProxyApprovalBridge): void {
-  if (!bridge.running) throw new Error('Iron Proxy approval bridge is not running');
+function assertReady(settings: IronProxySettings): void {
   for (const file of [settings.caCert, settings.caKey, settings.secretFile, settings.agentCaCert]) {
     if (!fs.existsSync(file)) throw new Error(`Iron Proxy prerequisite is missing: ${file}`);
   }
@@ -272,125 +272,129 @@ export function ironProxyContribution(
 
 interface LiveLease extends IronApprovalIdentity {
   unavailable?: string;
-  notify?: (reason?: string) => void;
+  notify?: (reason: string) => void;
 }
 
-export class IronProxyProvider implements GatewayProvider {
-  readonly kind = 'iron-proxy';
-  readonly #leases = new Map<string, LiveLease>();
-  readonly #bridge: IronProxyApprovalBridge;
-  #monitor: NodeJS.Timeout | null = null;
+export function defineIronProxyProvider(initialSettings?: IronProxySettings): GatewayProviderDefinition {
+  let settings = initialSettings;
+  const leases = new Map<string, LiveLease>();
+  let monitor: NodeJS.Timeout | null = null;
+  let bridge: IronProxyApprovalBridge | null = null;
 
-  readonly approvalBridge;
-
-  constructor(readonly settings: IronProxySettings = readIronProxySettings()) {
-    this.#bridge = new IronProxyApprovalBridge(
+  const currentSettings = (): IronProxySettings => (settings ??= readIronProxySettings());
+  const currentBridge = (): IronProxyApprovalBridge => {
+    if (bridge) return bridge;
+    const configured = currentSettings();
+    bridge = new IronProxyApprovalBridge(
       {
-        socketPath: settings.approvalSocket,
-        timeoutMs: settings.approvalTimeoutMs,
-        maxPending: settings.maxPending,
+        socketPath: configured.approvalSocket,
+        timeoutMs: configured.approvalTimeoutMs,
+        maxPending: configured.maxPending,
       },
-      (runtimeIdentity) => this.#leases.get(runtimeIdentity),
+      (runtimeIdentity) => leases.get(runtimeIdentity),
     );
-    this.approvalBridge = {
-      start: ({ deliveryAdapter }: { deliveryAdapter: import('../delivery.js').ChannelDeliveryAdapter }) =>
-        this.#bridge.start(deliveryAdapter),
-      stop: () => this.#bridge.stop(),
-      handleResponse: (payload: import('../response-registry.js').ResponsePayload) =>
-        this.#bridge.handleResponse(payload),
-      renderQuestion: (questionId: string) => this.#bridge.renderQuestion(questionId),
-    };
-  }
+    return bridge;
+  };
 
-  prepareSession(input: GatewaySessionInput): Promise<GatewaySession> {
-    return Promise.resolve(this.#openSession(input));
-  }
-
-  adoptSession(input: GatewaySessionInput): Promise<GatewaySession> {
-    return Promise.resolve(this.#openSession(input));
-  }
-
-  async reapResidue(installSlug: string, adopted: readonly GatewaySessionInput['key'][]): Promise<void> {
-    const root = path.join(this.settings.materialRoot, 'iron-proxy', 'sessions');
-    if (!fs.existsSync(root)) return;
-    const live = new Set(adopted.map((key) => `${key.installSlug}\0${key.agentGroupId}\0${key.sessionId}`));
+  const listOwned = async (installSlug: string): Promise<readonly GatewayOwnedSession[]> => {
+    const root = path.join(currentSettings().materialRoot, 'iron-proxy', 'sessions');
+    if (!fs.existsSync(root)) return [];
+    const owned: GatewayOwnedSession[] = [];
     for (const entry of fs.readdirSync(root)) {
       const dir = path.join(root, entry);
       try {
         const owner = JSON.parse(fs.readFileSync(path.join(dir, 'owner.json'), 'utf8')) as {
+          runtimeIdentity?: string;
           key?: GatewaySessionInput['key'];
         };
-        const key = owner.key;
-        if (!key || key.installSlug !== installSlug) continue;
-        if (!live.has(`${key.installSlug}\0${key.agentGroupId}\0${key.sessionId}`)) {
-          fs.rmSync(dir, { recursive: true, force: true });
-        }
+        if (!owner.runtimeIdentity || !owner.key || owner.key.installSlug !== installSlug) continue;
+        if (entry !== materialId(owner.runtimeIdentity)) throw new Error('resource id does not match its owner');
+        owned.push({ runtimeIdentity: owner.runtimeIdentity, resourceId: entry });
       } catch (err) {
         log.warn('Ignoring unrecognized Iron Proxy residue', { dir, err });
       }
     }
-  }
+    return owned;
+  };
 
-  #openSession(input: GatewaySessionInput): GatewaySession {
+  const revoke = async (resource: GatewayOwnedSession): Promise<void> => {
+    if (!/^[0-9a-f]{64}$/.test(resource.resourceId)) throw new Error('Invalid Iron Proxy resource id');
+    const dir = path.join(currentSettings().materialRoot, 'iron-proxy', 'sessions', resource.resourceId);
+    if (!fs.existsSync(dir)) return;
+    const owner = JSON.parse(fs.readFileSync(path.join(dir, 'owner.json'), 'utf8')) as { runtimeIdentity?: string };
+    if (
+      owner.runtimeIdentity !== resource.runtimeIdentity ||
+      materialId(resource.runtimeIdentity) !== resource.resourceId
+    ) {
+      throw new Error('Iron Proxy resource ownership mismatch');
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  };
+
+  const startMonitor = (): void => {
+    if (monitor) return;
+    monitor = setInterval(() => {
+      const configured = currentSettings();
+      const missing = [configured.caCert, configured.caKey, configured.secretFile].find((file) => !fs.existsSync(file));
+      const reason = !currentBridge().running
+        ? 'Iron Proxy approval bridge unavailable'
+        : missing
+          ? `Iron Proxy material unavailable: ${missing}`
+          : '';
+      if (!reason) return;
+      clearInterval(monitor!);
+      monitor = null;
+      for (const lease of leases.values()) {
+        lease.unavailable = reason;
+        lease.notify?.(reason);
+      }
+    }, 2_000);
+    monitor.unref();
+  };
+
+  const ensure = async (input: GatewaySessionInput, signal: AbortSignal): Promise<GatewaySessionLease> => {
     if (!input.capabilities.auxiliaryContainers) {
       throw new Error('Selected runtime driver cannot manage the Iron Proxy session container');
     }
-    assertReady(this.settings, this.#bridge);
-    const configFile = writeSessionMaterial(this.settings, input);
+    const configured = currentSettings();
+    await currentBridge().ready();
+    assertReady(configured);
+    const configFile = writeSessionMaterial(configured, input);
     const lease: LiveLease = {
       runtimeIdentity: input.runtimeIdentity,
       sessionId: input.key.sessionId,
       agentGroupId: input.key.agentGroupId,
       groupName: input.groupName,
     };
-    this.#leases.set(input.runtimeIdentity, lease);
-    this.#startMonitor();
-    const close = async (revoke: boolean): Promise<void> => {
-      if (this.#leases.get(input.runtimeIdentity) !== lease) return;
-      this.#leases.delete(input.runtimeIdentity);
-      await this.#bridge.cancelIdentity(input.runtimeIdentity);
-      if (revoke) fs.rmSync(sessionMaterialDir(this.settings, input.runtimeIdentity), { recursive: true, force: true });
-      if (this.#leases.size === 0 && this.#monitor) {
-        clearInterval(this.#monitor);
-        this.#monitor = null;
+    leases.set(input.runtimeIdentity, lease);
+    startMonitor();
+    const close = () => {
+      if (leases.get(input.runtimeIdentity) !== lease) return;
+      leases.delete(input.runtimeIdentity);
+      currentBridge().cancelIdentity(input.runtimeIdentity);
+      if (leases.size === 0 && monitor) {
+        clearInterval(monitor);
+        monitor = null;
       }
     };
+    if (signal.aborted) close();
+    else signal.addEventListener('abort', close, { once: true });
     return {
-      contribution: ironProxyContribution(this.settings, input, configFile),
-      onUnavailable(callback) {
-        lease.notify = callback;
-        if (lease.unavailable) callback(lease.unavailable);
+      contribution: ironProxyContribution(configured, input, configFile),
+      owned: { runtimeIdentity: input.runtimeIdentity, resourceId: materialId(input.runtimeIdentity) },
+      onUnavailable(report) {
+        lease.notify = report;
+        if (lease.unavailable) report(lease.unavailable);
       },
-      detach: () => close(false),
-      release: () => close(true),
     };
-  }
+  };
 
-  #startMonitor(): void {
-    if (this.#monitor) return;
-    this.#monitor = setInterval(() => {
-      const missing = [this.settings.caCert, this.settings.caKey, this.settings.secretFile].find(
-        (file) => !fs.existsSync(file),
-      );
-      const reason = !this.#bridge.running
-        ? 'Iron Proxy approval bridge unavailable'
-        : missing
-          ? `Iron Proxy material unavailable: ${missing}`
-          : '';
-      if (!reason) return;
-      clearInterval(this.#monitor!);
-      this.#monitor = null;
-      for (const lease of this.#leases.values()) {
-        lease.unavailable = reason;
-        lease.notify?.(reason);
-      }
-    }, 2_000);
-    this.#monitor.unref();
-  }
+  return {
+    kind: 'iron-proxy',
+    agentSkills: ['iron-proxy-gateway'],
+    sessions: { ensure, listOwned, revoke },
+    approvals: { subscribe: (decide, signal) => currentBridge().subscribe(decide, signal) },
+  };
 }
 
-registerGatewayProvider({
-  kind: 'iron-proxy',
-  agentSkills: ['iron-proxy-gateway'],
-  create: () => new IronProxyProvider(),
-});
+registerGatewayProvider(defineIronProxyProvider());

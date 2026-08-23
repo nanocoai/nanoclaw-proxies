@@ -6,48 +6,10 @@ import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ChannelDeliveryAdapter } from '../delivery.js';
-import type { PendingApproval } from '../types.js';
-
-const state = vi.hoisted(() => ({
-  rows: new Map<string, PendingApproval>(),
-  authorized: true,
-  failRead: false,
-}));
+import type { GatewayApprovalDecision, GatewayApprovalRequest } from './gateway-provider-registry.js';
 
 vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
-}));
-vi.mock('../modules/approvals/primitive.js', () => ({
-  pickApprover: async () => ['slack:owner'],
-  pickApprovalDelivery: async () => ({
-    userId: 'slack:owner',
-    messagingGroup: { channel_type: 'slack', platform_id: 'D1', instance: 'slack' },
-  }),
-}));
-vi.mock('../modules/approvals/response-handler.js', () => ({
-  isAuthorizedApprovalClick: async () => state.authorized,
-}));
-vi.mock('../db/sessions.js', () => ({
-  createPendingApproval: async (row: PendingApproval) => {
-    if (state.rows.has(row.approval_id)) return false;
-    state.rows.set(row.approval_id, row);
-    return true;
-  },
-  deletePendingApproval: async (id: string) => state.rows.delete(id),
-  getPendingApproval: async (id: string) => {
-    if (state.failRead) throw new Error('read failed');
-    return state.rows.get(id);
-  },
-  getPendingApprovalsByAction: async (action: string) =>
-    [...state.rows.values()].filter((row) => row.action === action),
-  getSession: async () => ({ id: 'session', agent_group_id: 'group', status: 'active' }),
-  transitionPendingApprovalStatus: async (id: string, from: string, to: PendingApproval['status']) => {
-    const row = state.rows.get(id);
-    if (!row || row.status !== from) return false;
-    row.status = to;
-    return true;
-  },
 }));
 
 import {
@@ -64,16 +26,25 @@ interface TransformClient extends grpc.Client {
   ): grpc.ClientUnaryCall;
 }
 
+interface HeldDecision {
+  request: GatewayApprovalRequest;
+  resolve: (decision: GatewayApprovalDecision) => void;
+}
+
 const identity: IronApprovalIdentity = {
   runtimeIdentity: 'install/group/session',
   sessionId: 'session',
   agentGroupId: 'group',
   groupName: 'Group One',
 };
-const adapter: ChannelDeliveryAdapter = { deliver: vi.fn(async () => 'message-1') };
+const held = new Map<string, HeldDecision>();
+let identityActive = true;
+let failDecider = false;
 let root: string;
 let bridge: IronProxyApprovalBridge;
 let client: TransformClient;
+let controller: AbortController;
+let subscription: Promise<void>;
 
 function metadata(runtimeIdentity = identity.runtimeIdentity): grpc.Metadata {
   const value = new grpc.Metadata();
@@ -81,52 +52,62 @@ function metadata(runtimeIdentity = identity.runtimeIdentity): grpc.Metadata {
   return value;
 }
 
-function transform(
+function transformCall(
   request: Record<string, unknown> = {
     request: {
       method: 'POST',
       url: 'https://api.anthropic.com/v1/messages?private=query',
       host: 'api.anthropic.com',
-      headers: { Authorization: { values: ['Bearer gateway-managed'] } },
+      headers: { Authorization: { values: ['Bearer real-secret'] } },
       body: Buffer.from('private body'),
     },
   },
   requestMetadata = metadata(),
-): Promise<{ action: number }> {
-  return new Promise((resolve, reject) => {
-    client.transformRequest(request, requestMetadata, (error, response) => (error ? reject(error) : resolve(response)));
+): { call: grpc.ClientUnaryCall; result: Promise<{ action: number }> } {
+  let call!: grpc.ClientUnaryCall;
+  const result = new Promise<{ action: number }>((resolve, reject) => {
+    call = client.transformRequest(request, requestMetadata, (error, response) =>
+      error ? reject(error) : resolve(response),
+    );
   });
+  return { call, result };
 }
 
-function response(questionId: string, value: string) {
-  return {
-    questionId,
-    value,
-    userId: 'slack:owner',
-    channelType: 'slack',
-    platformId: 'D1',
-    threadId: null,
-  };
+async function transform(
+  request?: Record<string, unknown>,
+  requestMetadata?: grpc.Metadata,
+): Promise<{ action: number }> {
+  return transformCall(request, requestMetadata).result;
 }
 
-async function heldRequest(): Promise<{ id: string; decision: Promise<{ action: number }> }> {
-  const decision = transform();
-  await vi.waitFor(() => expect(state.rows.size).toBe(1));
-  return { id: [...state.rows.keys()][0], decision };
+async function heldRequest(): Promise<{
+  id: string;
+  request: GatewayApprovalRequest;
+  result: Promise<{ action: number }>;
+}> {
+  const { result } = transformCall();
+  await vi.waitFor(() => expect(held.size).toBe(1));
+  const [id, decision] = [...held.entries()][0];
+  return { id, request: decision.request, result };
 }
 
 beforeEach(async () => {
-  state.rows.clear();
-  state.authorized = true;
-  state.failRead = false;
+  held.clear();
+  identityActive = true;
+  failDecider = false;
   vi.clearAllMocks();
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'iron-approval-'));
   const protoPath = path.join(process.cwd(), 'src', 'gateway-providers', 'iron-proxy-transform.proto');
   bridge = new IronProxyApprovalBridge(
     { socketPath: path.join(root, 'approval.sock'), timeoutMs: 100, maxPending: 1, protoPath },
-    (runtimeIdentity) => (runtimeIdentity === identity.runtimeIdentity ? identity : undefined),
+    (runtimeIdentity) => (identityActive && runtimeIdentity === identity.runtimeIdentity ? identity : undefined),
   );
-  await bridge.start(adapter);
+  controller = new AbortController();
+  subscription = bridge.subscribe(async (request) => {
+    if (failDecider) throw new Error('core unavailable');
+    return new Promise<GatewayApprovalDecision>((resolve) => held.set(request.id, { request, resolve }));
+  }, controller.signal);
+  await bridge.ready();
   const definition = protoLoader.loadSync(protoPath, { defaults: true, enums: Number });
   const loaded = grpc.loadPackageDefinition(definition) as unknown as {
     transform: { v1: { TransformService: grpc.ServiceClientConstructor } };
@@ -139,46 +120,45 @@ beforeEach(async () => {
 
 afterEach(async () => {
   client.close();
-  await bridge.stop();
+  controller.abort();
+  await subscription;
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe('Iron Proxy approval bridge', () => {
-  it('holds before injection, renders a privacy-safe card, and forwards exactly once', async () => {
-    const held = await heldRequest();
+describe('Iron Proxy approval transport', () => {
+  it('holds a privacy-safe normalized request and forwards exactly once after approval', async () => {
+    const request = await heldRequest();
     let settled = false;
-    held.decision.finally(() => {
+    void request.result.finally(() => {
       settled = true;
     });
     await Promise.resolve();
     expect(settled).toBe(false);
-    await expect(bridge.renderQuestion(held.id)).resolves.toMatchObject({ title: 'Network credentials request' });
-    const card = JSON.parse(vi.mocked(adapter.deliver).mock.calls[0][4] as string) as { question: string };
-    expect(card.question).toContain('POST api.anthropic.com/v1/messages');
-    expect(card.question).not.toContain('private=query');
-    expect(card.question).not.toContain('gateway-managed');
-    expect(card.question).not.toContain('private body');
+    expect(request.request).toMatchObject({
+      agentGroupId: 'group',
+      sessionId: 'session',
+      runtimeIdentity: identity.runtimeIdentity,
+      title: 'Network credentials request',
+      audit: { method: 'POST', host: 'api.anthropic.com', path: '/v1/messages' },
+    });
+    const visible = JSON.stringify(request.request);
+    expect(visible).not.toContain('private=query');
+    expect(visible).not.toContain('real-secret');
+    expect(visible).not.toContain('private body');
 
-    await expect(bridge.handleResponse(response(held.id, 'approve'))).resolves.toBe(true);
-    await expect(held.decision).resolves.toMatchObject({ action: 1 });
-    expect(state.rows.size).toBe(0);
+    held.get(request.id)!.resolve('approve');
+    await expect(request.result).resolves.toMatchObject({ action: 1 });
+    expect(bridge.pendingCount).toBe(0);
   });
 
-  it('rejects wrong users, wrong session decisions, spoofed identity, and overload', async () => {
-    const held = await heldRequest();
-    state.authorized = false;
-    await expect(bridge.handleResponse(response(held.id, 'approve'))).resolves.toBe(true);
-    expect(bridge.pendingCount).toBe(1);
-
+  it('rejects stale identity, spoofed identity, and overload', async () => {
+    const first = await heldRequest();
     const overloaded = await transform();
     expect(overloaded.action).toBe(2);
-    expect(state.rows.size).toBe(1);
 
-    state.authorized = true;
-    const row = state.rows.get(held.id)!;
-    row.payload = JSON.stringify({ runtimeIdentity: 'install/group/other' });
-    await bridge.handleResponse(response(held.id, 'approve'));
-    await expect(held.decision).resolves.toMatchObject({ action: 2 });
+    identityActive = false;
+    held.get(first.id)!.resolve('approve');
+    await expect(first.result).resolves.toMatchObject({ action: 2 });
 
     const spoofed = await transform(
       {
@@ -192,38 +172,42 @@ describe('Iron Proxy approval bridge', () => {
       new grpc.Metadata(),
     );
     expect(spoofed.action).toBe(2);
-    expect(state.rows.size).toBe(0);
   });
 
-  it('approves the inner HTTP request once and never creates a CONNECT approval', async () => {
+  it('continues synthetic CONNECT without creating a duplicate approval', async () => {
     const connect = await transform({
       request: { method: 'CONNECT', url: '//api.anthropic.com:443', host: 'api.anthropic.com:443' },
     });
     expect(connect.action).toBe(1);
-    expect(state.rows.size).toBe(0);
+    expect(held.size).toBe(0);
 
-    const held = await heldRequest();
-    expect(state.rows.size).toBe(1);
-    await bridge.handleResponse(response(held.id, 'approve'));
-    await expect(held.decision).resolves.toMatchObject({ action: 1 });
+    const inner = await heldRequest();
+    held.get(inner.id)!.resolve('approve');
+    await expect(inner.result).resolves.toMatchObject({ action: 1 });
   });
 
-  it('fails closed on denial, timeout, handler failure, and bridge restart', async () => {
+  it('fails closed on denial, timeout, callback failure, cancellation, and restart', async () => {
     const denied = await heldRequest();
-    await bridge.handleResponse(response(denied.id, 'reject'));
-    await expect(denied.decision).resolves.toMatchObject({ action: 2 });
+    held.get(denied.id)!.resolve('deny');
+    await expect(denied.result).resolves.toMatchObject({ action: 2 });
 
     const timedOut = await heldRequest();
-    await expect(timedOut.decision).resolves.toMatchObject({ action: 2 });
+    await expect(timedOut.result).resolves.toMatchObject({ action: 2 });
+    held.clear();
 
-    const failed = await heldRequest();
-    state.failRead = true;
-    await bridge.handleResponse(response(failed.id, 'approve'));
-    await expect(failed.decision).resolves.toMatchObject({ action: 2 });
-    state.failRead = false;
+    failDecider = true;
+    await expect(transform()).resolves.toMatchObject({ action: 2 });
+    failDecider = false;
+
+    const cancelled = transformCall();
+    await vi.waitFor(() => expect(bridge.pendingCount).toBe(1));
+    cancelled.call.cancel();
+    await expect(cancelled.result).rejects.toMatchObject({ code: grpc.status.CANCELLED });
+    held.clear();
 
     const restarted = await heldRequest();
-    await bridge.stop();
-    await expect(restarted.decision).resolves.toMatchObject({ action: 2 });
+    controller.abort();
+    await expect(restarted.result).resolves.toMatchObject({ action: 2 });
+    await subscription;
   });
 });

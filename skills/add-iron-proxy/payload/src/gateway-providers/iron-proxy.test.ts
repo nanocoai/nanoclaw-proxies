@@ -7,19 +7,14 @@ import { describe, expect, it, vi } from 'vitest';
 import type { GatewaySessionInput } from './gateway-provider-registry.js';
 
 vi.mock('../env.js', () => ({ readEnvFile: () => ({}) }));
-vi.mock('../db/sessions.js', () => ({
-  createPendingApproval: vi.fn(),
-  deletePendingApproval: vi.fn(),
-  getPendingApproval: vi.fn(),
-  getPendingApprovalsByAction: async () => [],
-  getSession: vi.fn(),
-  transitionPendingApprovalStatus: vi.fn(),
+vi.mock('../log.js', () => ({
+  log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 
 import {
+  defineIronProxyProvider,
   ironProxyConfig,
   ironProxyContribution,
-  IronProxyProvider,
   readIronProxySettings,
   type IronProxySettings,
 } from './iron-proxy.js';
@@ -109,7 +104,7 @@ describe('Iron Proxy provider', () => {
     ).toThrow(/inside NANOCLAW_SESSION_MATERIAL_ROOT/);
   });
 
-  it('keeps detach adoptable, revokes on release, and reports lost material', async () => {
+  it('uses one idempotent ensure, preserves on abort, and revokes only explicitly', async () => {
     const project = fs.mkdtempSync(path.join('/private/tmp', 'ip-'));
     const liveSettings: IronProxySettings = {
       ...settings,
@@ -125,22 +120,32 @@ describe('Iron Proxy provider', () => {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, 'test');
     }
-    const provider = new IronProxyProvider(liveSettings);
-    await provider.approvalBridge.start({ deliveryAdapter: { deliver: vi.fn() } } as never);
-    const first = await provider.prepareSession(input);
+
+    const provider = defineIronProxyProvider(liveSettings);
+    const approvalController = new AbortController();
+    const subscription = provider.approvals.subscribe(async () => 'deny', approvalController.signal);
+    const firstController = new AbortController();
+    const first = await provider.sessions.ensure(input, firstController.signal);
     const configFile = first.contribution.containers?.[0].mounts[0].hostPath as string;
     expect(fs.existsSync(configFile)).toBe(true);
-    await first.detach?.('host restart');
+    firstController.abort();
     expect(fs.existsSync(configFile)).toBe(true);
 
-    const adopted = await provider.adoptSession(input);
+    const secondController = new AbortController();
+    const second = await provider.sessions.ensure(input, secondController.signal);
+    expect(second.owned).toEqual(first.owned);
+    await expect(provider.sessions.listOwned('install')).resolves.toEqual([first.owned]);
+
     const unavailable = vi.fn();
-    adopted.onUnavailable?.(unavailable);
+    second.onUnavailable?.(unavailable);
     fs.rmSync(liveSettings.secretFile);
     await vi.waitFor(() => expect(unavailable).toHaveBeenCalled(), { timeout: 3_000 });
-    await adopted.release('session ended');
+    secondController.abort();
+    await provider.sessions.revoke(second.owned!, 'session ended');
     expect(fs.existsSync(path.dirname(configFile))).toBe(false);
-    await provider.approvalBridge.stop();
+
+    approvalController.abort();
+    await subscription;
     fs.rmSync(project, { recursive: true, force: true });
   });
 });

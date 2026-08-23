@@ -5,31 +5,14 @@ import path from 'node:path';
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 
-import type { QuestionRender } from '../channels/question-render-registry.js';
-import {
-  createPendingApproval,
-  deletePendingApproval,
-  getPendingApproval,
-  getPendingApprovalsByAction,
-  getSession,
-  transitionPendingApprovalStatus,
-} from '../db/sessions.js';
-import type { ChannelDeliveryAdapter } from '../delivery.js';
 import { log } from '../log.js';
-import { pickApprovalDelivery, pickApprover } from '../modules/approvals/primitive.js';
-import { isAuthorizedApprovalClick } from '../modules/approvals/response-handler.js';
-import type { ResponsePayload } from '../response-registry.js';
-import type { PendingApproval } from '../types.js';
 
-export const IRON_PROXY_APPROVAL_ACTION = 'iron_proxy_credential';
+import type { GatewayApprovalDecision, GatewayApprovalRequest } from './gateway-provider-registry.js';
+
 export const IRON_PROXY_IDENTITY_METADATA = 'x-iron-workload-identity';
 
 const CONTINUE = 1;
 const REJECT = 2;
-const OPTIONS = [
-  { label: 'Approve', selectedLabel: '✅ Approved', value: 'approve', style: 'primary' as const },
-  { label: 'Reject', selectedLabel: '❌ Rejected', value: 'reject', style: 'danger' as const },
-];
 
 interface TransformRequest {
   method?: string;
@@ -60,13 +43,13 @@ export interface IronApprovalBridgeSettings {
   protoPath?: string;
 }
 
-interface PendingState {
+interface PendingTransform {
   identity: string;
-  timer: NodeJS.Timeout;
-  resolve: (approved: boolean) => void;
+  settle: (decision: GatewayApprovalDecision) => void;
 }
 
 type IdentityResolver = (runtimeIdentity: string) => IronApprovalIdentity | undefined;
+type ApprovalDecider = (request: GatewayApprovalRequest) => Promise<GatewayApprovalDecision>;
 
 function rejection(text = 'Request denied by approval policy'): TransformReply {
   return { action: REJECT, response: { statusCode: 403, body: Buffer.from(text) } };
@@ -84,13 +67,12 @@ function safeRequest(
   if (!/^[A-Z]{1,16}$/.test(method)) return undefined;
   const host = (request?.host ?? '').slice(0, 253);
   if (!host || /[\0\r\n]/.test(host)) return undefined;
-  let requestPath = '/';
   try {
-    requestPath = new URL(request?.url || '/', `https://${host}`).pathname;
+    const requestPath = new URL(request?.url || '/', `https://${host}`).pathname.slice(0, 240) || '/';
+    return { method, host, path: requestPath };
   } catch {
     return undefined;
   }
-  return { method, host, path: requestPath.slice(0, 240) || '/' };
 }
 
 function serviceDefinition(protoPath: string): grpc.ServiceDefinition {
@@ -106,10 +88,12 @@ function serviceDefinition(protoPath: string): grpc.ServiceDefinition {
   return loaded.transform.v1.TransformService.service;
 }
 
+/** Iron's gRPC transport. NanoClaw core owns the human approval workflow. */
 export class IronProxyApprovalBridge {
-  readonly #pending = new Map<string, PendingState>();
-  #adapter: ChannelDeliveryAdapter | null = null;
+  readonly #pending = new Map<string, PendingTransform>();
   #server: grpc.Server | null = null;
+  #ready: Promise<void> | null = null;
+  #decide: ApprovalDecider | null = null;
 
   constructor(
     readonly settings: IronApprovalBridgeSettings,
@@ -124,13 +108,35 @@ export class IronProxyApprovalBridge {
     return this.#pending.size;
   }
 
-  async start(deliveryAdapter: ChannelDeliveryAdapter): Promise<void> {
-    if (this.#server) return;
-    this.#adapter = deliveryAdapter;
-    await this.#sweepStaleApprovals();
+  async ready(): Promise<void> {
+    if (!this.#ready) throw new Error('Iron Proxy approval subscription has not started');
+    await this.#ready;
+    if (!this.#server) throw new Error('Iron Proxy approval bridge is unavailable');
+  }
+
+  async subscribe(decide: ApprovalDecider, signal: AbortSignal): Promise<void> {
+    if (this.#ready) throw new Error('Iron Proxy approval subscription already started');
+    if (signal.aborted) return;
+    this.#decide = decide;
+    this.#ready = this.#start();
+    await this.#ready;
+    if (signal.aborted) {
+      await this.#stop();
+      return;
+    }
+    await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+    await this.#stop();
+  }
+
+  cancelIdentity(runtimeIdentity: string): void {
+    for (const state of this.#pending.values()) {
+      if (state.identity === runtimeIdentity) state.settle('deny');
+    }
+  }
+
+  async #start(): Promise<void> {
     fs.mkdirSync(path.dirname(this.settings.socketPath), { recursive: true, mode: 0o700 });
     fs.rmSync(this.settings.socketPath, { force: true });
-
     const server = new grpc.Server({
       'grpc.max_receive_message_length': 1024 * 1024,
       'grpc.max_send_message_length': 64 * 1024,
@@ -170,12 +176,10 @@ export class IronProxyApprovalBridge {
     log.info('Iron Proxy approval bridge started', { socketPath: this.settings.socketPath });
   }
 
-  async stop(): Promise<void> {
+  async #stop(): Promise<void> {
     const server = this.#server;
     this.#server = null;
-    for (const [approvalId, state] of [...this.#pending]) {
-      await this.#forceDeny(approvalId, state, 'host restarted');
-    }
+    for (const state of [...this.#pending.values()]) state.settle('deny');
     if (server) {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
@@ -188,212 +192,62 @@ export class IronProxyApprovalBridge {
         });
       });
     }
-    this.#adapter = null;
+    this.#decide = null;
+    this.#ready = null;
     fs.rmSync(this.settings.socketPath, { force: true });
-  }
-
-  async handleResponse(payload: ResponsePayload): Promise<boolean> {
-    try {
-      const approval = await getPendingApproval(payload.questionId);
-      if (!approval || approval.action !== IRON_PROXY_APPROVAL_ACTION) return false;
-      if (!(await isAuthorizedApprovalClick(approval, payload))) return true;
-      const state = this.#pending.get(approval.approval_id);
-      const stored = JSON.parse(approval.payload) as { runtimeIdentity?: string };
-      if (!state || stored.runtimeIdentity !== state.identity || !this.resolveIdentity(state.identity)) {
-        if (state) await this.#forceDeny(approval.approval_id, state, 'identity mismatch');
-        else await deletePendingApproval(approval.approval_id);
-        return true;
-      }
-      await this.#settle(approval, state, payload.value === 'approve');
-      return true;
-    } catch (err) {
-      const state = this.#pending.get(payload.questionId);
-      if (state) await this.#forceDeny(payload.questionId, state, 'handler failure');
-      log.error('Iron Proxy approval response failed closed', { approvalId: payload.questionId, err });
-      return true;
-    }
-  }
-
-  async renderQuestion(questionId: string): Promise<QuestionRender | undefined> {
-    const approval = await getPendingApproval(questionId);
-    if (!approval || approval.action !== IRON_PROXY_APPROVAL_ACTION || !approval.title) return undefined;
-    return {
-      title: approval.title,
-      question: approval.question || undefined,
-      options: JSON.parse(approval.options_json) as QuestionRender['options'],
-    };
-  }
-
-  async cancelIdentity(runtimeIdentity: string): Promise<void> {
-    for (const [approvalId, state] of [...this.#pending]) {
-      if (state.identity === runtimeIdentity) await this.#forceDeny(approvalId, state, 'session ended');
-    }
   }
 
   async #transformRequest(
     call: grpc.ServerUnaryCall<TransformRequestMessage, TransformReply>,
   ): Promise<TransformReply> {
-    if (!this.#server || !this.#adapter) return rejection('Approval bridge unavailable');
+    if (!this.#server || !this.#decide) return rejection('Approval bridge unavailable');
     const runtimeIdentity = metadataIdentity(call.metadata);
-    if (!runtimeIdentity) return rejection('Unknown workload identity');
-    const identity = this.resolveIdentity(runtimeIdentity);
-    if (!identity) return rejection('Unknown workload identity');
+    const identity = runtimeIdentity ? this.resolveIdentity(runtimeIdentity) : undefined;
+    if (!runtimeIdentity || !identity) return rejection('Unknown workload identity');
 
     const request = safeRequest(call.request.request);
     if (!request) return rejection('Invalid request metadata');
-    // Iron evaluates a synthetic CONNECT before MITM. The inner HTTP request is
-    // the only approval point, preventing two cards for one upstream request.
+    // Iron uses a synthetic CONNECT before MITM. The inner HTTP request is the
+    // only approval point; Iron itself closes non-HTTP/TLS tunnel payloads.
     if (request.method === 'CONNECT') return { action: CONTINUE };
     if (this.#pending.size >= this.settings.maxPending) return rejection('Approval queue is full');
 
-    const session = await getSession(identity.sessionId);
-    if (!session || session.agent_group_id !== identity.agentGroupId || session.status !== 'active') {
-      return rejection('Session is no longer active');
-    }
-    const approvers = await pickApprover(identity.agentGroupId);
-    const target = await pickApprovalDelivery(approvers, '');
-    if (!target) return rejection('No eligible approver is reachable');
-
-    const approvalId = `ip-${randomBytes(4).toString('hex')}`;
-    const title = 'Network credentials request';
-    const question = `*Agent:* ${identity.groupName.slice(0, 120)}\n*Request:* ${request.method} ${request.host}${request.path}`;
-    let platformMessageId: string | undefined;
-    try {
-      platformMessageId = await this.#adapter.deliver(
-        target.messagingGroup.channel_type,
-        target.messagingGroup.platform_id,
-        null,
-        'chat-sdk',
-        JSON.stringify({ type: 'ask_question', questionId: approvalId, title, question, options: OPTIONS }),
-        undefined,
-        target.messagingGroup.instance,
-      );
-    } catch (err) {
-      log.error('Failed to deliver Iron Proxy approval card', { approvalId, err });
-      return rejection('Approval card delivery failed');
-    }
-
+    const id = `iron-${randomBytes(10).toString('hex')}`;
     const createdAt = new Date();
     const expiresAt = new Date(createdAt.getTime() + this.settings.timeoutMs);
-    const created = await createPendingApproval({
-      approval_id: approvalId,
-      session_id: identity.sessionId,
-      request_id: approvalId,
-      action: IRON_PROXY_APPROVAL_ACTION,
-      payload: JSON.stringify({ runtimeIdentity, method: request.method, host: request.host, path: request.path }),
-      created_at: createdAt.toISOString(),
-      agent_group_id: identity.agentGroupId,
-      channel_type: target.messagingGroup.channel_type,
-      platform_id: target.messagingGroup.platform_id,
-      instance: target.messagingGroup.instance ?? null,
-      platform_message_id: platformMessageId ?? null,
-      expires_at: expiresAt.toISOString(),
-      status: 'pending',
-      approver_user_id: target.userId,
-      title,
-      question,
-      options_json: JSON.stringify(OPTIONS),
-    });
-    if (!created) return rejection('Approval id collision');
+    const approval: GatewayApprovalRequest = {
+      id,
+      agentGroupId: identity.agentGroupId,
+      sessionId: identity.sessionId,
+      runtimeIdentity: identity.runtimeIdentity,
+      createdAt: createdAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      title: 'Network credentials request',
+      question: `*Agent:* ${identity.groupName.slice(0, 120)}\n*Request:* ${request.method} ${request.host}${request.path}`,
+      audit: request,
+    };
 
-    const approved = await new Promise<boolean>((resolve) => {
-      const state: PendingState = {
-        identity: runtimeIdentity,
-        resolve,
-        timer: setTimeout(() => {
-          const approval = getPendingApproval(approvalId);
-          void approval
-            .then(async (row) => {
-              if (row) await this.#settle(row, state, false, 'expired');
-              else await this.#forceDeny(approvalId, state, 'timeout');
-            })
-            .catch(() => this.#forceDeny(approvalId, state, 'timeout'));
-        }, this.settings.timeoutMs),
+    const decision = await new Promise<GatewayApprovalDecision>((resolve) => {
+      let settled = false;
+      const finish = (value: GatewayApprovalDecision) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.#pending.delete(id);
+        const active = this.resolveIdentity(runtimeIdentity);
+        resolve(
+          active?.sessionId === identity.sessionId && active.agentGroupId === identity.agentGroupId ? value : 'deny',
+        );
       };
-      this.#pending.set(approvalId, state);
-      call.on('cancelled', () => void this.#forceDeny(approvalId, state, 'request cancelled'));
+      const timer = setTimeout(() => finish('deny'), this.settings.timeoutMs);
+      const state: PendingTransform = { identity: runtimeIdentity, settle: finish };
+      this.#pending.set(id, state);
+      call.on('cancelled', () => finish('deny'));
+      void this.#decide!(approval).then(finish, (err) => {
+        log.error('Iron Proxy approval callback failed closed', { requestId: id, err });
+        finish('deny');
+      });
     });
-    return approved ? { action: CONTINUE } : rejection();
-  }
-
-  async #settle(
-    approval: PendingApproval,
-    state: PendingState,
-    approved: boolean,
-    deniedStatus: 'rejected' | 'expired' = 'rejected',
-  ): Promise<boolean> {
-    if (this.#pending.get(approval.approval_id) !== state) return false;
-    const claimed = await transitionPendingApprovalStatus(
-      approval.approval_id,
-      'pending',
-      approved ? 'approved' : deniedStatus,
-    );
-    if (!claimed) return false;
-    this.#pending.delete(approval.approval_id);
-    clearTimeout(state.timer);
-    if (!approved && deniedStatus === 'expired') await this.#editExpiredCard(approval, 'no response');
-    await deletePendingApproval(approval.approval_id);
-    state.resolve(approved);
-    return true;
-  }
-
-  async #forceDeny(approvalId: string, state: PendingState, reason: string): Promise<void> {
-    if (this.#pending.get(approvalId) !== state) return;
-    this.#pending.delete(approvalId);
-    clearTimeout(state.timer);
-    try {
-      const approval = await getPendingApproval(approvalId);
-      if (approval) {
-        await this.#editExpiredCard(approval, reason === 'host restarted' ? 'host restarted' : 'request cancelled');
-      }
-    } catch (err) {
-      log.error('Failed to read denied Iron Proxy approval', { approvalId, err });
-    } finally {
-      try {
-        await transitionPendingApprovalStatus(approvalId, 'pending', 'expired');
-        await deletePendingApproval(approvalId);
-      } catch (err) {
-        log.error('Failed to delete denied Iron Proxy approval', { approvalId, err });
-      }
-      state.resolve(false);
-    }
-  }
-
-  async #editExpiredCard(
-    row: PendingApproval,
-    reason: 'no response' | 'host restarted' | 'request cancelled',
-  ): Promise<void> {
-    if (!this.#adapter || !row.platform_message_id || !row.channel_type || !row.platform_id) return;
-    const resolution =
-      reason === 'no response'
-        ? '⏱️ Timed out — no response'
-        : reason === 'host restarted'
-          ? '⏱️ Timed out — host restarted before resolution'
-          : '⛔ Cancelled before resolution';
-    try {
-      await this.#adapter.deliver(
-        row.channel_type,
-        row.platform_id,
-        null,
-        'chat-sdk',
-        JSON.stringify({
-          operation: 'edit',
-          messageId: row.platform_message_id,
-          text: [row.title, row.question, resolution].filter(Boolean).join('\n\n'),
-          terminalCard: { title: row.title, question: row.question, resolution },
-        }),
-        undefined,
-        row.instance ?? row.channel_type,
-      );
-    } catch (err) {
-      log.error('Failed to edit expired Iron Proxy approval card', { approvalId: row.approval_id, err });
-    }
-  }
-
-  async #sweepStaleApprovals(): Promise<void> {
-    for (const row of await getPendingApprovalsByAction(IRON_PROXY_APPROVAL_ACTION)) {
-      await this.#editExpiredCard(row, 'host restarted');
-      await deletePendingApproval(row.approval_id);
-    }
+    return decision === 'approve' ? { action: CONTINUE } : rejection();
   }
 }

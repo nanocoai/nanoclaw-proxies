@@ -22,22 +22,22 @@ function existingCredential(): boolean {
   return !!value && value !== "not-configured";
 }
 
-function customEndpoint(): {
+export function customEndpoint(env: NodeJS.ProcessEnv = process.env): {
   secret: string;
   authEnv: string;
   modelHost: string;
   baseUrl: string;
 } | null {
-  const baseUrl = process.env.NANOCLAW_ANTHROPIC_BASE_URL?.trim();
-  const secret = process.env.NANOCLAW_ANTHROPIC_AUTH_TOKEN?.trim();
+  const baseUrl = env.NANOCLAW_ANTHROPIC_BASE_URL?.trim();
+  const secret = env.NANOCLAW_ANTHROPIC_AUTH_TOKEN?.trim();
   if (!baseUrl || !secret) return null;
   const url = new URL(baseUrl);
-  if (
-    url.protocol !== "https:" &&
-    !["localhost", "127.0.0.1", "::1"].includes(url.hostname)
-  ) {
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const local = ["localhost", "127.0.0.1", "::1"].includes(hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) {
     throw new Error("Custom Claude endpoint must use HTTPS unless it is local");
   }
+  if (local) url.hostname = "host.docker.internal";
   return {
     secret,
     authEnv: "ANTHROPIC_AUTH_TOKEN",

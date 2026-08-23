@@ -1,6 +1,6 @@
 ---
 name: add-iron-proxy
-description: Install or refresh Iron Proxy as NanoClaw's session-scoped gateway provider. Use when setup selects Iron Proxy or its pinned runtime, approval bridge, policy, credential custody, and agent guidance must be restored.
+description: Install or refresh Iron Proxy as NanoClaw's session-scoped gateway provider. Use when setup selects Iron Proxy or its pinned runtime, approval transport, policy, credential custody, and agent guidance must be restored.
 ---
 
 # Add Iron Proxy gateway
@@ -21,7 +21,7 @@ payload/container/skills/iron-proxy-gateway/instructions.md -> container/skills/
 
 ## Register once
 
-The provider file makes the only product registration call. The generic seam connects lifecycle, typed session contributions, approval handling, network access, and agent guidance.
+The provider file makes the only product registration call. It declares idempotent sessions, typed runtime contributions, owned-resource cleanup, normalized approvals, network access, and agent guidance. NanoClaw core owns approval persistence, cards, clicks, authorization, and timeouts.
 
 ```nc:append to:src/gateway-providers/installed.ts
 import './iron-proxy.js';
@@ -49,7 +49,7 @@ pnpm run build
 ```
 
 ```nc:run effect:test
-pnpm exec vitest run src/gateway-providers/iron-proxy.test.ts src/gateway-providers/iron-proxy-approval.test.ts src/gateway-providers/gateway-provider-registry.test.ts
+pnpm exec vitest run src/gateway-providers/iron-proxy.test.ts src/gateway-providers/iron-proxy-approval.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts
 ```
 
 The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=iron-proxy` only after every directive succeeds. Agent-provider authentication stores the real model credential only in an owner-only file mounted into the selected session proxy. Sessions receive a placeholder and public CA.
