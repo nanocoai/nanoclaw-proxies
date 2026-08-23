@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,12 +33,13 @@ export function statePaths(projectRoot = process.cwd()) {
     path.join(projectRoot, 'data', 'session-materials');
   const root = path.join(materialRoot, 'iron-proxy');
   const shared = path.join(root, 'shared');
+  const approvalDir = path.join(os.tmpdir(), `nanoclaw-iron-${getInstallSlug(projectRoot)}`);
   return {
     materialRoot,
     root,
     shared,
-    approvalDir: path.join(root, 'approval'),
-    approvalSocket: path.join(root, 'approval', 'approval.sock'),
+    approvalDir,
+    approvalSocket: path.join(approvalDir, 'approval.sock'),
     caCert: path.join(shared, 'ca.crt'),
     caKey: path.join(shared, 'ca.key'),
     secretFile: path.join(shared, 'upstream-secret'),

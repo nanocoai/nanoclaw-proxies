@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { parse as parseYaml } from 'yaml';
 import { describe, expect, it, vi } from 'vitest';
@@ -103,6 +104,17 @@ describe('Iron Proxy provider', () => {
         root,
       ),
     ).toThrow(/inside NANOCLAW_SESSION_MATERIAL_ROOT/);
+  });
+
+  it('keeps its Unix socket portable for long checkout paths', async () => {
+    const projectRoot = path.join(os.tmpdir(), 'checkout', 'nested'.repeat(20));
+    const configured = readIronProxySettings({ NANOCLAW_IRON_PROXY_IMAGE: digest }, projectRoot);
+    const { statePaths } = await import(
+      pathToFileURL(path.resolve('.claude/skills/add-iron-proxy/scripts/setup.ts')).href
+    );
+    expect(Buffer.byteLength(configured.approvalSocket)).toBeLessThanOrEqual(100);
+    expect(path.relative(os.tmpdir(), configured.approvalSocket)).not.toMatch(/^\.\./);
+    expect(statePaths(projectRoot).approvalSocket).toBe(configured.approvalSocket);
   });
 
   it('uses one idempotent ensure, preserves on abort, and revokes only explicitly', async () => {

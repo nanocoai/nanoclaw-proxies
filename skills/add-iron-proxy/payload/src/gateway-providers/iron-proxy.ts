@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { stringify as stringifyYaml } from 'yaml';
 
 import { readEnvFile } from '../env.js';
+import { getInstallSlug } from '../install-slug.js';
 import { log } from '../log.js';
 
 import { IronProxyApprovalBridge, type IronApprovalIdentity } from './iron-proxy-approval.js';
@@ -74,11 +76,19 @@ function integerSetting(raw: string, fallback: number, min: number, max: number,
   return value;
 }
 
-function assertMaterialPath(file: string, root: string, label: string): void {
+function isInside(file: string, root: string): boolean {
   const relative = path.relative(root, file);
-  if (!path.isAbsolute(file) || relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+  return path.isAbsolute(file) && relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function assertMaterialPath(file: string, root: string, label: string): void {
+  if (!isInside(file, root)) {
     throw new Error(`Iron Proxy ${label} must be inside NANOCLAW_SESSION_MATERIAL_ROOT`);
   }
+}
+
+function defaultApprovalSocket(projectRoot: string): string {
+  return path.join(os.tmpdir(), `nanoclaw-iron-${getInstallSlug(projectRoot)}`, 'approval.sock');
 }
 
 export function validateAllowedHost(raw: string): string {
@@ -109,7 +119,7 @@ export function readIronProxySettings(
     caCert: value('NANOCLAW_IRON_PROXY_CA_CERT') || path.join(gatewayRoot, 'shared', 'ca.crt'),
     caKey: value('NANOCLAW_IRON_PROXY_CA_KEY') || path.join(gatewayRoot, 'shared', 'ca.key'),
     secretFile: value('NANOCLAW_IRON_PROXY_SECRET_FILE') || path.join(gatewayRoot, 'shared', 'upstream-secret'),
-    approvalSocket: value('NANOCLAW_IRON_PROXY_APPROVAL_SOCKET') || path.join(gatewayRoot, 'approval', 'approval.sock'),
+    approvalSocket: value('NANOCLAW_IRON_PROXY_APPROVAL_SOCKET') || defaultApprovalSocket(projectRoot),
     agentCaCert: path.join(projectRoot, 'container', 'skills', 'iron-proxy-gateway', 'ca.crt'),
     allowedHostsFile:
       value('NANOCLAW_IRON_PROXY_ALLOWED_HOSTS') || path.join(gatewayRoot, 'shared', 'allowed-hosts.json'),
@@ -129,10 +139,16 @@ export function readIronProxySettings(
     caCert: settings.caCert,
     caKey: settings.caKey,
     secretFile: settings.secretFile,
-    approvalSocket: settings.approvalSocket,
     allowedHostsFile: settings.allowedHostsFile,
   })) {
     assertMaterialPath(materialPath, materialRoot, label);
+  }
+  const portableSocketRoot = path.dirname(defaultApprovalSocket(projectRoot));
+  if (!isInside(settings.approvalSocket, materialRoot) && !isInside(settings.approvalSocket, portableSocketRoot)) {
+    throw new Error('Iron Proxy approvalSocket must stay inside its dedicated runtime directory');
+  }
+  if (Buffer.byteLength(settings.approvalSocket) > 100) {
+    throw new Error('Iron Proxy approvalSocket exceeds the portable Unix socket path limit');
   }
   return settings;
 }
