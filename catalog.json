@@ -7,6 +7,12 @@
       "label": "OneCLI",
       "description": "Credential vault, request-time secret injection, and approval cards.",
       "skillPath": "skills/add-onecli"
+    },
+    {
+      "kind": "iron-proxy",
+      "label": "Iron Proxy",
+      "description": "Local credential custody, explicit egress policy, and request-time secret replacement.",
+      "skillPath": "skills/add-iron-proxy"
     }
   ]
 }

@@ -1,0 +1,17 @@
+{
+  "skill_name": "add-iron-proxy",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Install Iron Proxy as the NanoClaw gateway and keep credentials out of agent containers.",
+      "expected_output": "Applies the pinned skill, performs one provider registration, starts one install-scoped proxy, and gives sessions only a placeholder and read-only CA.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Allow api.github.com through the installed Iron Proxy policy.",
+      "expected_output": "Adds the explicit host through the skill setup command, preserves the selected model host, and restarts only the install-owned proxy container.",
+      "files": []
+    }
+  ]
+}

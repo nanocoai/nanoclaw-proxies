@@ -9,5 +9,6 @@ Each provider owns its runtime adapter, setup, tests, cleanup guidance, and agen
 | Skill | Purpose |
 | --- | --- |
 | `add-onecli` | OneCLI credential gateway and approval cards |
+| `add-iron-proxy` | Iron Proxy local credential custody and explicit egress policy |
 
 Consumers must pin a commit SHA. Branches, tags, and `HEAD` are not valid install references.

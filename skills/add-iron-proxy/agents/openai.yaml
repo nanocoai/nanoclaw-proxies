@@ -1,0 +1,4 @@
+interface:
+  display_name: "Add Iron Proxy gateway"
+  short_description: "Install NanoClaw's Iron Proxy gateway provider"
+  default_prompt: "Install or refresh Iron Proxy through NanoClaw's gateway seam and validate the result."
