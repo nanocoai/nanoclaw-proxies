@@ -9,16 +9,11 @@ This skill owns the full OneCLI integration. NanoClaw core supplies the generic 
 
 ## Install the provider payload
 
-Copy the skill-owned runtime adapter, approval bridge, conformance tests, and agent guidance into their normal NanoClaw paths.
+Copy the native adapter, its tests, and agent guidance into their normal NanoClaw paths. NanoClaw core owns the approval workflow.
 
 ```nc:copy
 payload/src/gateway-providers/onecli.ts -> src/gateway-providers/onecli.ts
 payload/src/gateway-providers/onecli.test.ts -> src/gateway-providers/onecli.test.ts
-payload/src/gateway-providers/onecli-uninstall.ts -> src/gateway-providers/onecli-uninstall.ts
-payload/src/gateway-providers/onecli-uninstall.test.ts -> src/gateway-providers/onecli-uninstall.test.ts
-payload/src/modules/approvals/onecli-approvals.ts -> src/modules/approvals/onecli-approvals.ts
-payload/src/modules/approvals/onecli-approvals.test.ts -> src/modules/approvals/onecli-approvals.test.ts
-payload/src/modules/approvals/expired-card-instance.test.ts -> src/modules/approvals/expired-card-instance.test.ts
 payload/container/skills/onecli-gateway/SKILL.md -> container/skills/onecli-gateway/SKILL.md
 payload/container/skills/onecli-gateway/instructions.md -> container/skills/onecli-gateway/instructions.md
 payload/docs/onecli-upgrades.md -> docs/onecli-upgrades.md
@@ -26,7 +21,7 @@ payload/docs/onecli-upgrades.md -> docs/onecli-upgrades.md
 
 ## Register once
 
-The provider file makes the only product registration call. The generic seam connects its lifecycle, session lease, network access, approval response handler, and agent skill.
+The provider file makes the only product registration call. It translates OneCLI sessions and native approval events into the generic contract.
 
 ```nc:append to:src/gateway-providers/installed.ts
 import './onecli.js';
@@ -53,7 +48,7 @@ pnpm run build
 ```
 
 ```nc:run effect:test
-pnpm exec vitest run src/gateway-providers/onecli.test.ts src/gateway-providers/onecli-uninstall.test.ts src/modules/approvals/onecli-approvals.test.ts src/modules/approvals/expired-card-instance.test.ts src/gateway-providers/gateway-provider-registry.test.ts
+pnpm exec vitest run src/gateway-providers/onecli.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts
 ```
 
 The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=onecli` only after every directive above succeeds. Claude authentication is then completed through `scripts/auth.ts`; credentials never enter an agent container.

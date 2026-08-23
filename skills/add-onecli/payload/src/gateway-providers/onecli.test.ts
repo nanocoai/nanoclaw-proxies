@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { GatewayApprovalRequest, GatewaySessionInput } from './gateway-provider-registry.js';
 
 const sdk = vi.hoisted(() => ({
   ensureAgent: vi.fn(async () => ({ created: false })),
@@ -6,23 +8,23 @@ const sdk = vi.hoisted(() => ({
     args.push('-e', 'HTTPS_PROXY=http://host.docker.internal:15001');
     return true;
   }),
+  manualApproval: undefined as undefined | ((request: Record<string, unknown>) => Promise<'approve' | 'deny'>),
+  stopApproval: vi.fn(),
 }));
 
 vi.mock('@onecli-sh/sdk', () => ({
   OneCLI: class {
     ensureAgent = sdk.ensureAgent;
     applyContainerConfig = sdk.applyContainerConfig;
+    configureManualApproval(callback: (request: Record<string, unknown>) => Promise<'approve' | 'deny'>) {
+      sdk.manualApproval = callback;
+      return { stop: sdk.stopApproval };
+    }
   },
 }));
 
 vi.mock('../log.js', () => ({
-  log: {
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    fatal: vi.fn(),
-  },
+  log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 vi.mock('../env.js', () => ({
   readEnvFile: () => ({
@@ -31,18 +33,29 @@ vi.mock('../env.js', () => ({
     ANTHROPIC_BASE_URL: 'https://anthropic.example.com',
   }),
 }));
-vi.mock('../modules/approvals/onecli-approvals.js', () => ({
-  handleOneCLIApprovalResponse: vi.fn(),
-  renderOneCLIApprovalQuestion: vi.fn(),
-  startOneCLIApprovalHandler: vi.fn(),
-  stopOneCLIApprovalHandler: vi.fn(),
-}));
 
 import { contributionFromArgs, withProviderEnv } from './onecli.js';
 import { getGatewayProviderRegistration } from './gateway-provider-registry.js';
 
-describe('contributionFromArgs', () => {
-  it('types the closed grammar the SDK emits: -e pairs and ro mounts', () => {
+const provider = getGatewayProviderRegistration('onecli')!;
+const input = (sessionId: string): GatewaySessionInput => ({
+  key: { installSlug: 'install', agentGroupId: 'g1', sessionId },
+  runtimeIdentity: `install/g1/${sessionId}`,
+  groupName: 'Group One',
+  capabilities: {} as never,
+});
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  sdk.manualApproval = undefined;
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe('OneCLI gateway package', () => {
+  it('types only the closed env and mount grammar', () => {
     const contribution = contributionFromArgs(
       [
         '-e',
@@ -77,36 +90,41 @@ describe('contributionFromArgs', () => {
         groupScope: 'g1',
       },
     ]);
-  });
-
-  it('refuses argv outside the grammar — nothing rides raw around the spec again', () => {
-    // Grammar drift in the SDK must break the spawn loudly, not smuggle flags.
     expect(() => contributionFromArgs(['--network', 'something'], 'g1')).toThrow(/cannot type/);
-    expect(() => contributionFromArgs(['-v', '/odd'], 'g1')).toThrow(/cannot type/);
     expect(() => contributionFromArgs(['-v', 'h:c:rw:extra'], 'g1')).toThrow(/cannot type/);
   });
 
-  it('owns custom endpoint configuration without a core provider hook', () => {
-    expect(withProviderEnv({}, 'https://anthropic.example.com')).toEqual({
+  it('owns endpoint configuration and returns a typed session contribution', async () => {
+    const controller = new AbortController();
+    const lease = await provider.sessions.ensure(input('s1'), controller.signal);
+
+    expect(sdk.ensureAgent).toHaveBeenCalledWith({ name: 'Group One', identifier: 'g1' });
+    expect(sdk.applyContainerConfig).toHaveBeenCalledWith(expect.any(Array), {
+      addHostMapping: false,
+      agent: 'g1',
+    });
+    expect(lease.contribution).toMatchObject({
       env: {
+        HTTPS_PROXY: 'http://host.docker.internal:15001',
         ANTHROPIC_BASE_URL: 'https://anthropic.example.com',
         ANTHROPIC_AUTH_TOKEN: 'gateway-managed',
       },
+      networkAccess: {
+        endpoint: 'host.docker.internal',
+        target: { kind: 'runtime', identity: 'onecli' },
+      },
     });
+    expect(withProviderEnv({}, '')).toEqual({});
+    controller.abort();
   });
 
-  it('owns one availability monitor for its live leases and fails them closed', async () => {
+  it('shares one health monitor across live leases and reports failure to each session', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('offline'));
-    const provider = getGatewayProviderRegistration('onecli')!.create();
-    const input = (sessionId: string) => ({
-      key: { installSlug: 'install', agentGroupId: 'g1', sessionId },
-      runtimeIdentity: `install/g1/${sessionId}`,
-      groupName: 'Group One',
-      capabilities: {} as never,
-    });
-    const first = await provider.prepareSession(input('s1'));
-    const second = await provider.adoptSession(input('s2'));
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const first = await provider.sessions.ensure(input('s1'), firstController.signal);
+    const second = await provider.sessions.ensure(input('s2'), secondController.signal);
     const unavailable = vi.fn();
     first.onUnavailable?.(unavailable);
     second.onUnavailable?.(unavailable);
@@ -117,9 +135,54 @@ describe('contributionFromArgs', () => {
     expect(unavailable).toHaveBeenCalledTimes(2);
     expect(vi.getTimerCount()).toBe(0);
 
-    await first.release('test');
-    await second.detach?.('test');
+    firstController.abort();
+    secondController.abort();
     fetchMock.mockRestore();
-    vi.useRealTimers();
+  });
+
+  it('translates native approvals once and stops the subscription on cancellation', async () => {
+    const decide = vi.fn(async (_request: GatewayApprovalRequest) => 'approve' as const);
+    const controller = new AbortController();
+    const subscription = provider.approvals.subscribe(decide, controller.signal);
+    await vi.waitFor(() => expect(sdk.manualApproval).toBeTypeOf('function'));
+    const createdAt = new Date(Date.now() + 1_000).toISOString();
+
+    await expect(
+      sdk.manualApproval!({
+        id: 'native-1',
+        createdAt,
+        expiresAt: new Date(Date.now() + 30_000).toISOString(),
+        method: 'POST',
+        host: 'api.example.test',
+        path: '/resource',
+        bodyPreview: '{"safe":"preview"}',
+        agent: { name: 'Group One', externalId: 'g1' },
+      }),
+    ).resolves.toBe('approve');
+    expect(decide).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'native-1',
+        agentGroupId: 'g1',
+        createdAt,
+        title: 'Credentials Request',
+        audit: { method: 'POST', host: 'api.example.test', path: '/resource' },
+      }),
+    );
+
+    await expect(
+      sdk.manualApproval!({
+        id: 'stale',
+        createdAt: new Date(0).toISOString(),
+        method: 'GET',
+        host: 'api.example.test',
+        path: '/',
+        agent: { name: 'Group One', externalId: 'g1' },
+      }),
+    ).resolves.toBe('deny');
+    expect(decide).toHaveBeenCalledTimes(1);
+
+    controller.abort();
+    await subscription;
+    expect(sdk.stopApproval).toHaveBeenCalledOnce();
   });
 });

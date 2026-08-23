@@ -80,6 +80,35 @@ function saveEnv(key: string, value: string): void {
   );
 }
 
+function migrateLegacyEnvSecret(): boolean {
+  const file = path.join(process.cwd(), ".env");
+  if (!fs.existsSync(file)) return false;
+  const current = fs.readFileSync(file, "utf8");
+  const keys = [
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_AUTH_TOKEN",
+  ];
+  const found = keys.flatMap((key) => {
+    const value = current.match(new RegExp(`^${key}=(.+)$`, "m"))?.[1]?.trim();
+    return value ? [{ key, value }] : [];
+  });
+  if (found.length === 0) return false;
+  if (found.length > 1) {
+    throw new Error(
+      `Multiple Anthropic credentials exist in .env (${found.map(({ key }) => key).join(", ")}); keep one and retry`,
+    );
+  }
+  saveSecret(found[0].value);
+  const next = current
+    .split("\n")
+    .filter((line) => !line.startsWith(`${found[0].key}=`))
+    .join("\n");
+  fs.writeFileSync(file, next, { mode: 0o600 });
+  p.log.success("Migrated the Anthropic credential from .env into OneCLI.");
+  return true;
+}
+
 function answer<T>(value: T | symbol): T {
   if (p.isCancel(value)) throw new Error("Authentication cancelled");
   return value as T;
@@ -94,6 +123,8 @@ export async function run(): Promise<void> {
     p.log.success("Claude endpoint connected.");
     return;
   }
+
+  if (migrateLegacyEnvSecret()) return;
 
   if (hasAnthropicSecret()) {
     p.log.success("Claude account is already connected.");
