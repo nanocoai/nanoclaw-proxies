@@ -1,6 +1,13 @@
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
-import { withLinuxHostGateway } from '../../.claude/skills/add-onecli/scripts/setup.js';
+const { withLinuxHostGateway } = await import(
+  pathToFileURL(
+    path.resolve('.claude/skills/add-onecli/scripts/setup.ts'),
+  ).href
+);
 
 const compose = `services:
   onecli:
