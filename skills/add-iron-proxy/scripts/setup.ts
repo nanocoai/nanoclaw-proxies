@@ -128,6 +128,7 @@ ${domains.map((host) => `        - ${JSON.stringify(host)}`).join("\n")}
             require: true
           rules:
             - host: ${JSON.stringify(validateAllowedHost(modelHost))}
+              methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 
 metrics:
   listen: "127.0.0.1:19090"
